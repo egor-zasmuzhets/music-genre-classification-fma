@@ -1,0 +1,29 @@
+# Все пути к данным и директориям проекта
+
+# Корень проекта (относительно этого файла)
+project_root: "D:/Projects/PythonProject/music-genre-classification-fma"  # можно оставить пустым, будет вычисляться в коде
+
+# Внешние данные (не в репозитории)
+external_data:
+  # Метаданные FMA (tracks.csv, features.csv, genres.csv)
+  metadata_dir: "E:/music-genre-classifier/fma_metadata"
+  # ZIP-архивы с аудио
+  fma_small_zip: "E:/music-genre-classifier/fma_small.zip"
+  fma_medium_zip: "E:/music-genre-classifier/fma_medium.zip"
+  fma_large_zip: "E:/music-genre-classifier/fma_large.zip"
+
+  # Активный датасет (small/medium/large)
+  active_subset: "medium"
+  active_zip: "E:/music-genre-classifier/fma_medium.zip"
+
+# Внутренние директории проекта (относительно корня)
+project_dirs:
+  data:
+    raw: "./data/raw"           # сырые данные (если будут)
+    processed: "./data/processed"  # кэш признаков
+    external: "./data/external"    # внешние ссылки/метаданные
+  checkpoints: "./checkpoints"  # веса моделей
+  results: "./results"          # графики, таблицы
+  models: "./models"            # экспортированные модели
+  notebooks: "./notebooks"      # Jupyter
+  logs: "./logs"                # логи (создадим позже)
