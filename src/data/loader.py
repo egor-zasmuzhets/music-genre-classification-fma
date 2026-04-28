@@ -40,7 +40,8 @@ class FMALoader:
             self._tracks = pd.read_csv(
                 tracks_path,
                 header=[0, 1],
-                index_col=0
+                index_col=0,
+                low_memory=False
             )
             print(f"Загружено tracks: {self._tracks.shape}")
         return self._tracks
@@ -55,7 +56,9 @@ class FMALoader:
 
             self._features = pd.read_csv(
                 features_path,
-                index_col=0
+                header=[0, 1, 2],
+                index_col=0,
+                low_memory=False
             )
             print(f"Загружено features: {self._features.shape}")
         return self._features
@@ -89,12 +92,22 @@ class FMALoader:
 
         # Колонка с подмножеством может быть в разных местах
         if ('set', 'subset') in tracks.columns:
-            filtered = tracks[tracks[('set', 'subset')] == subset].copy()
+            if subset == 'small':
+                filtered = tracks[tracks[('set', 'subset')] == subset].copy()
+            elif subset == 'medium':
+                filtered = tracks[tracks[('set', 'subset')] != 'large'].copy()
+            elif subset == 'large':
+                filtered = tracks.copy()
         else:
             # Fallback: ищем колонку с 'subset' на любом уровне
             subset_cols = [c for c in tracks.columns if 'subset' in c]
             if subset_cols:
-                filtered = tracks[tracks[subset_cols[0]] == subset].copy()
+                if subset == 'small':
+                    filtered = tracks[tracks[('set', 'subset')] == subset].copy()
+                elif subset == 'medium':
+                    filtered = tracks[tracks[('set', 'subset')] != 'large'].copy()
+                elif subset == 'large':
+                    filtered = tracks.copy()
             else:
                 raise KeyError("Не найдена колонка с информацией о подмножестве")
 
