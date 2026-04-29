@@ -2,16 +2,16 @@
 
 > **PR:** Metadata pipeline
 > **Author:** @egor-zasmuzhets
-> **Generated:** 2026-04-28 16:55:05 UTC
+> **Generated:** 2026-04-29 07:34:35 UTC
 
 ## Summary
 
 | Severity | Count |
 |----------|-------|
-| 🔴 High | 1 |
-| 🟡 Medium | 7 |
-| 🟢 Low | 7 |
-| **Total** | 15 |
+| 🔴 High | 2 |
+| 🟡 Medium | 8 |
+| 🟢 Low | 6 |
+| **Total** | 16 |
 
 ## Detailed Issues
 
@@ -22,146 +22,156 @@
 |----------|-------|
 | **File** | `src/data/load_processed.py` |
 | **Code** | `print(f"Загрузка данных из {self.cache_dir}...")` |
-| **Description** | The print statement can be considered as a performance issue if the code is executed in a production environment or in a large-scale data processing pipeline. It would be better to use a logging mechanism instead. |
+| **Description** | The print statement can be removed or replaced with a logging statement for better performance in production environments. |
 | **Suggestion** | Replace the print statement with a logging statement, e.g., logging.info(f"Loading data from {self.cache_dir}...") |
 
 
-### 🟢 STYLE (line 43)
+### 🟢 STYLE (line 30)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/load_processed.py` |
-| **Code** | `self.subset = subset or paths.active_subset` |
-| **Description** | The line of code is not following the PEP 8 style guide for Python. The 'or' operator should be used with caution and it's better to use the 'if-else' statement for clarity. |
-| **Suggestion** | Replace the line with an if-else statement, e.g., if subset is None: self.subset = paths.active_subset else: self.subset = subset |
+| **Code** | `def __init__(self, subset: Optional[str] = None, min_samples_per_genre: Optional[int] = None, cache_` |
+| **Description** | The __init__ method has a long parameter list. Consider using a dataclass or a separate configuration class for better readability. |
+| **Suggestion** | Consider using a dataclass or a separate configuration class to simplify the __init__ method. |
 
 
-### 🟡 SECURITY (line 96)
+### 🟡 BUG (line 76)
+
+| Property | Value |
+|----------|-------|
+| **File** | `src/data/load_processed.py` |
+| **Code** | `if not self.exists():` |
+| **Description** | The exists method only checks if the cache file and metadata file exist. It does not check if the files are valid or if the data is consistent. |
+| **Suggestion** | Add additional checks to ensure the data is valid and consistent before loading it. |
+
+
+### 🔴 SECURITY (line 96)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/load_processed.py` |
 | **Code** | `with open(self.cache_dir / 'metadata.json', 'r') as f:` |
-| **Description** | The code is vulnerable to a potential path traversal attack if the cache_dir is not properly sanitized. An attacker could manipulate the cache_dir to access sensitive files. |
-| **Suggestion** | Sanitize the cache_dir to prevent path traversal attacks, e.g., using the pathlib.Path.resolve() method |
+| **Description** | The code assumes that the metadata file is in the correct format and does not contain any malicious data. However, if the file is tampered with, it could lead to security issues. |
+| **Suggestion** | Add input validation and error handling when loading the metadata file to prevent potential security issues. |
 
 
-### 🟢 BUG (line 107)
-
-| Property | Value |
-|----------|-------|
-| **File** | `src/data/load_processed.py` |
-| **Code** | `label_encoder = None` |
-| **Description** | The label_encoder is set to None if the preprocessor file does not exist. This could lead to a potential bug if the label_encoder is used later in the code without being checked for None. |
-| **Suggestion** | Add a check for None before using the label_encoder, e.g., if label_encoder is not None: ... else: raise an exception or handle the case accordingly |
-
-
-### 🟡 PERFORMANCE (line 45)
+### 🟡 PERFORMANCE (line 44)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/loader.py` |
-| **Code** | `print(f"Загружено tracks: {self._tracks.shape}")` |
-| **Description** | Printing the shape of the tracks DataFrame can be slow for large DataFrames. Consider using a logging mechanism instead. |
-| **Suggestion** | Use a logging library to log the shape of the tracks DataFrame instead of printing it. |
+| **Code** | `low_memory=False` |
+| **Description** | Using low_memory=False can lead to high memory usage and potentially cause performance issues. It should be used with caution and only when necessary. |
+| **Suggestion** | Consider using chunking or other memory-efficient methods to load large CSV files. |
 
 
-### 🟢 STYLE (line 90)
-
-| Property | Value |
-|----------|-------|
-| **File** | `src/data/loader.py` |
-| **Code** | `# Колонка с подмножеством может быть в разных местах` |
-| **Description** | The comment is not in English, which may make it harder for non-Russian speakers to understand the code. |
-| **Suggestion** | Consider translating the comment to English or using a more descriptive variable name. |
-
-
-### 🟡 BUG (line 126)
-
-| Property | Value |
-|----------|-------|
-| **File** | `src/data/loader.py` |
-| **Code** | `if total != len(tracks_df):` |
-| **Description** | The warning message is printed when there are tracks without a split, but it does not provide any information about which tracks are missing a split. |
-| **Suggestion** | Consider adding more information to the warning message, such as the indices of the tracks without a split. |
-
-
-### 🟢 SECURITY (line 27)
+### 🟢 STYLE (line 27)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/loader.py` |
 | **Code** | `self.metadata_dir = metadata_dir or paths.metadata_dir` |
-| **Description** | The metadata directory path is not validated, which could potentially lead to a path traversal vulnerability. |
-| **Suggestion** | Consider validating the metadata directory path to ensure it is within a expected directory. |
+| **Description** | The line of code is using the 'or' operator to set a default value. While this works, it can be confusing for some readers and may not be immediately clear what the intention is. |
+| **Suggestion** | Consider using the ternary operator (e.g., self.metadata_dir = metadata_dir if metadata_dir else paths.metadata_dir) for better readability. |
 
 
-### 🟡 PERFORMANCE (line 204)
+### 🟡 BUG (line 96)
+
+| Property | Value |
+|----------|-------|
+| **File** | `src/data/loader.py` |
+| **Code** | `filtered = tracks[tracks[('set', 'subset')] == subset].copy()` |
+| **Description** | The code assumes that the column ('set', 'subset') always exists in the tracks DataFrame. If this column does not exist, a KeyError will be raised. |
+| **Suggestion** | Add error handling to check if the column exists before trying to access it. |
+
+
+### 🟢 STYLE (line 140)
+
+| Property | Value |
+|----------|-------|
+| **File** | `src/data/loader.py` |
+| **Code** | `print(f"Предупреждение: {len(tracks_df) - total} треков без разметки")` |
+| **Description** | The code is printing a warning message directly. It would be better to use a logging mechanism to handle warnings and other log messages. |
+| **Suggestion** | Consider using the logging module to handle log messages instead of print statements. |
+
+
+### 🟡 PERFORMANCE (line 73)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/pipeline.py` |
-| **Code** | `with open(cache_file, 'wb') as f: pickle.dump(self._data, f)` |
-| **Description** | Using pickle for serialization can be slow and insecure. Consider using a more efficient and secure method like joblib or JSON. |
-| **Suggestion** | Replace pickle with joblib or JSON for serialization. |
+| **Code** | `if not force_reload and self._is_cached():` |
+| **Description** | The cache check is performed every time the run method is called. Consider caching the result of the cache check to improve performance. |
+| **Suggestion** | Cache the result of the cache check in a separate variable and update it only when necessary. |
 
 
-### 🟢 STYLE (line 266)
-
-| Property | Value |
-|----------|-------|
-| **File** | `src/data/pipeline.py` |
-| **Code** | `print(f"  {i}: {genre}")` |
-| **Description** | The print statement can be improved for better readability. Consider using a logging library or a more structured output format. |
-| **Suggestion** | Use a logging library or improve the print statement for better readability. |
-
-
-### 🟡 BUG (line 243)
+### 🟢 STYLE (line 86)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/pipeline.py` |
-| **Code** | `if self._data is None: raise ValueError("Сначала запустите pipeline.run()")` |
-| **Description** | The error message is not very informative. Consider providing more context or details about the error. |
-| **Suggestion** | Improve the error message to provide more context or details about the error. |
+| **Code** | `if genre_col not in tracks.columns:` |
+| **Description** | The variable name 'genre_col' is not very descriptive. Consider renaming it to something more descriptive. |
+| **Suggestion** | Rename the variable to something like 'genre_column_name'. |
 
 
-### 🔴 SECURITY (line 232)
+### 🟡 BUG (line 93)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/pipeline.py` |
-| **Code** | `with open(cache_file, 'rb') as f: self._data = pickle.load(f)` |
-| **Description** | Using pickle.load() can pose a security risk if the data is not trusted. Consider using a safer method like JSON or a secure deserialization library. |
-| **Suggestion** | Replace pickle.load() with a safer method like JSON or a secure deserialization library. |
+| **Code** | `tracks_filtered = self.preprocessor.filter_rare_genres(tracks_with_genre, genre_col)` |
+| **Description** | The filter_rare_genres method may return None if no genres are found. Consider adding a check for this case. |
+| **Suggestion** | Add a check after calling filter_rare_genres to ensure that tracks_filtered is not None. |
 
 
-### 🟢 STYLE (line 56)
+### 🔴 SECURITY (line 204)
+
+| Property | Value |
+|----------|-------|
+| **File** | `src/data/pipeline.py` |
+| **Code** | `with open(cache_file, 'wb') as f:` |
+| **Description** | The code uses pickle to serialize and deserialize data. This can be a security risk if the data is not trusted. |
+| **Suggestion** | Consider using a safer serialization format like JSON or MessagePack. |
+
+
+### 🟡 STYLE (line 56)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/preprocessor.py` |
 | **Code** | `print(f"Удалено редких жанров: {len(rare_genres)}")` |
-| **Description** | The print statement is not necessary and can be removed for a cleaner code. |
-| **Suggestion** | Remove the print statement or replace it with a logging statement. |
+| **Description** | The code uses print statements for logging, which is not a good practice. Consider using a logging library instead. |
+| **Suggestion** | Use a logging library like the built-in logging module in Python. |
 
 
-### 🟡 PERFORMANCE (line 116)
+### 🟢 PERFORMANCE (line 83)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/preprocessor.py` |
-| **Code** | `X_train_scaled = self.scaler.fit_transform(X_train)` |
-| **Description** | The fit_transform method can be computationally expensive for large datasets. Consider using fit and transform separately. |
-| **Suggestion** | Use self.scaler.fit(X_train) and self.scaler.transform(X_train) separately for better performance. |
+| **Code** | `y_train_encoded = self.label_encoder.fit_transform(y_train)` |
+| **Description** | The code uses fit_transform on the LabelEncoder, which can be slow for large datasets. Consider using fit and transform separately. |
+| **Suggestion** | Use fit and transform separately to improve performance. |
 
 
-### 🟢 BUG (line 161)
+### 🟡 SECURITY (line 157)
+
+| Property | Value |
+|----------|-------|
+| **File** | `src/data/preprocessor.py` |
+| **Code** | `data = joblib.load(path)` |
+| **Description** | The code uses joblib.load to load data from a file, which can be a security risk if the file is not trusted. |
+| **Suggestion** | Use a secure way to load data, such as using a secure protocol or validating the data before loading it. |
+
+
+### 🟢 STYLE (line 161)
 
 | Property | Value |
 |----------|-------|
 | **File** | `src/data/preprocessor.py` |
 | **Code** | `self._is_fitted = True` |
-| **Description** | The _is_fitted attribute is set to True after loading the preprocessor, but it's not checked before using the preprocessor. |
-| **Suggestion** | Add a check for self._is_fitted before using the preprocessor to ensure it's been fitted or loaded. |
+| **Description** | The code uses a private attribute (_is_fitted) to track the state of the object. Consider using a property instead. |
+| **Suggestion** | Use a property to track the state of the object, which can make the code more readable and maintainable. |
 
