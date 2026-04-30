@@ -102,7 +102,10 @@ class Paths:
         self._resolved[key] = resolved
         return resolved
 
+    # ========================================================================
     # Внешние данные
+    # ========================================================================
+
     @property
     def metadata_dir(self) -> Path:
         return Path(self._raw["external_data"]["metadata_dir"])
@@ -118,7 +121,10 @@ class Paths:
     def get_fma_zip(self, subset: str) -> Path:
         return Path(self._raw["external_data"][f"fma_{subset}_zip"])
 
+    # ========================================================================
     # Внутренние директории
+    # ========================================================================
+
     @property
     def raw_data_dir(self) -> Path:
         return self._get_dir("data.raw")
@@ -147,7 +153,86 @@ class Paths:
     def logs_dir(self) -> Path:
         return self._get_dir("logs")
 
+    @property
+    def configs_dir(self) -> Path:
+        """Директория с конфигами"""
+        return PROJECT_ROOT / "configs"
+
+    # ========================================================================
+    # XGBoost Mono Classification (Single-Label)
+    # ========================================================================
+
+    @property
+    def xgboost_mono_dir(self) -> Path:
+        """Директория для результатов XGBoost mono"""
+        path = self.results_dir / "xgboost" / "mono"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_mono_models_dir(self) -> Path:
+        """Директория для моделей XGBoost mono"""
+        path = self.xgboost_mono_dir / "models"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_mono_plots_dir(self) -> Path:
+        """Директория для графиков XGBoost mono"""
+        path = self.xgboost_mono_dir / "plots"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_mono_grid_search_dir(self) -> Path:
+        """Директория для результатов Grid Search"""
+        path = self.xgboost_mono_dir / "grid_search"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_mono_metrics_dir(self) -> Path:
+        """Директория для JSON с метриками"""
+        path = self.xgboost_mono_dir / "metrics"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ========================================================================
+    # XGBoost Multi Classification (Multi-Label) — для будущего
+    # ========================================================================
+
+    @property
+    def xgboost_multi_dir(self) -> Path:
+        """Директория для результатов XGBoost multi"""
+        path = self.results_dir / "xgboost" / "multi"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_multi_models_dir(self) -> Path:
+        """Директория для моделей XGBoost multi"""
+        path = self.xgboost_multi_dir / "models"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_multi_plots_dir(self) -> Path:
+        """Директория для графиков XGBoost multi"""
+        path = self.xgboost_multi_dir / "plots"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def xgboost_multi_metrics_dir(self) -> Path:
+        """Директория для JSON с метриками"""
+        path = self.xgboost_multi_dir / "metrics"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    # ========================================================================
     # Конкретные файлы
+    # ========================================================================
+
     def get_tracks_csv(self) -> Path:
         return self.metadata_dir / "tracks.csv"
 
@@ -157,13 +242,21 @@ class Paths:
     def get_genres_csv(self) -> Path:
         return self.metadata_dir / "genres.csv"
 
-    # Вспомогательные
+    # ========================================================================
+    # Вспомогательные методы
+    # ========================================================================
+
     def ensure_dirs(self):
+        """Создаёт все необходимые директории"""
         for d in [self.raw_data_dir, self.processed_data_dir, self.external_data_dir,
-                  self.checkpoints_dir, self.results_dir, self.models_dir, self.logs_dir]:
+                  self.checkpoints_dir, self.results_dir, self.models_dir, self.logs_dir,
+                  self.xgboost_mono_dir, self.xgboost_mono_models_dir,
+                  self.xgboost_mono_plots_dir, self.xgboost_mono_grid_search_dir,
+                  self.xgboost_mono_metrics_dir]:
             d.mkdir(parents=True, exist_ok=True)
 
     def print_info(self):
+        """Выводит информацию о путях"""
         print(f"PROJECT_ROOT: {PROJECT_ROOT}")
         print(f"\n[Внешние данные]")
         print(f"  metadata_dir: {self.metadata_dir}")
@@ -174,6 +267,11 @@ class Paths:
         print(f"  checkpoints:  {self.checkpoints_dir}")
         print(f"  results:      {self.results_dir}")
         print(f"  models:       {self.models_dir}")
+        print(f"\n[XGBoost Mono]")
+        print(f"  models_dir:   {self.xgboost_mono_models_dir}")
+        print(f"  plots_dir:    {self.xgboost_mono_plots_dir}")
+        print(f"  metrics_dir:  {self.xgboost_mono_metrics_dir}")
+        print(f"  grid_search:  {self.xgboost_mono_grid_search_dir}")
 
 
 # ============================================================================
@@ -274,7 +372,6 @@ if __name__ == "__main__":
     print()
     audio_params.print_info()
 
-    # Создаём директории
     print("\nСоздание директорий...")
     paths.ensure_dirs()
     print("✅ Готово")

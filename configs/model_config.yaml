@@ -1,8 +1,8 @@
 model:
   name: "xgboost_baseline"
   type: "xgboost"
-  version: "1.0.0"
-  description: "XGBoost classifier for music genre classification on FMA Medium"
+  version: "2.0.0"
+  description: "XGBoost classifier for music genre classification with comprehensive metrics"
 
 parameters:
   n_estimators: 100
@@ -22,12 +22,14 @@ training:
   early_stopping_patience: 20
   eval_metric: "mlogloss"
 
+selection_metrics:
+  primary: "composite_score"
+  weights:
+    f1_macro: 0.4
+    top_3_accuracy: 0.4
+    f1_weighted: 0.2
+
 data:
   subset: "medium"
   min_samples_per_genre: 100
   use_features: true
-
-paths:
-  model_file: "models/xgboost_best.json"
-  results_file: "results/xgboost_model_results.json"
-  plots_dir: "results/plots"
