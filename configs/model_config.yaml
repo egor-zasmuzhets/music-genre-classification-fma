@@ -1,0 +1,35 @@
+model:
+  name: "xgboost_baseline"
+  type: "xgboost"
+  version: "2.0.0"
+  description: "XGBoost classifier for music genre classification with comprehensive metrics"
+
+parameters:
+  n_estimators: 100
+  max_depth: 9
+  learning_rate: 0.1
+  subsample: 0.8
+  colsample_bytree: 0.8
+  min_child_weight: 3
+  reg_alpha: 0.1
+  reg_lambda: 1
+  random_state: 42
+  n_jobs: -1
+
+training:
+  use_class_weights: true
+  early_stopping: true
+  early_stopping_patience: 20
+  eval_metric: "mlogloss"
+
+selection_metrics:
+  primary: "composite_score"
+  weights:
+    f1_macro: 0.4
+    top_3_accuracy: 0.4
+    f1_weighted: 0.2
+
+data:
+  subset: "medium"
+  min_samples_per_genre: 100
+  use_features: true
