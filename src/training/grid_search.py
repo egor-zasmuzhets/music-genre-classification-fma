@@ -6,7 +6,9 @@ Grid Search для подбора гиперпараметров XGBoost с ко
 import numpy as np
 import pandas as pd
 import time
+import json
 from pathlib import Path
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from sklearn.model_selection import ParameterGrid
@@ -27,22 +29,42 @@ class XGBoostGridSearch:
     - accuracy: общая точность
     """
 
+    # Имя файла по умолчанию для сохранения результатов
+    DEFAULT_RESULTS_NAME = "grid_search_results.csv"
+
     def __init__(
         self,
         param_grid: Dict[str, List[Any]],
         use_class_weights: bool = True,
-        verbose: bool = True
+        verbose: bool = True,
+        results_name: Optional[str] = None
     ):
         """
         Args:
             param_grid: словарь с сеткой параметров
             use_class_weights: использовать веса классов
             verbose: печатать прогресс
+            results_name: имя файла для сохранения результатов (без расширения)
         """
         self.param_grid = param_grid
         self.use_class_weights = use_class_weights
         self.verbose = verbose
+        self.results_name = results_name or self.DEFAULT_RESULTS_NAME
         self.results = []
+        self.best_model_info = None
+
+    def _get_default_path(self, filename: Optional[str] = None) -> Path:
+        """
+        Возвращает путь по умолчанию для результатов
+
+        Args:
+            filename: имя файла (если None — используется self.results_name)
+        """
+        name = filename or self.results_name
+        # Убеждаемся, что имя имеет расширение .csv
+        if not name.endswith('.csv'):
+            name = name + '.csv'
+        return paths.xgboost_mono_grid_search_dir / name
 
     def _get_param_combinations(self) -> List[Dict[str, Any]]:
         """Генерирует все комбинации параметров"""
@@ -56,10 +78,14 @@ class XGBoostGridSearch:
         y_val: np.ndarray,
         X_test: np.ndarray,
         y_test: np.ndarray,
-        genre_names: Optional[List[str]] = None
+        genre_names: Optional[List[str]] = None,
+        save_intermediate: bool = True
     ) -> pd.DataFrame:
         """
         Запускает Grid Search с расширенными метриками
+
+        Args:
+            save_intermediate: сохранять промежуточные результаты после каждой итерации
         """
         param_combinations = self._get_param_combinations()
         total = len(param_combinations)
@@ -70,6 +96,16 @@ class XGBoostGridSearch:
         print(f"Всего комбинаций: {total}")
         print("Метрики оценки: F1-macro, Top-3 Acc, F1-weighted, Composite Score")
         print("-" * 70)
+
+        best_composite = -1
+        best_f1_macro = -1
+        best_top3 = -1
+        best_accuracy = -1
+
+        best_composite_params = None
+        best_f1_macro_params = None
+        best_top3_params = None
+        best_accuracy_params = None
 
         for i, params in enumerate(param_combinations, 1):
             if self.verbose:
@@ -110,22 +146,62 @@ class XGBoostGridSearch:
             }
             self.results.append(result)
 
+            # Отслеживаем лучшие модели
+            if metrics['composite_score'] > best_composite:
+                best_composite = metrics['composite_score']
+                best_composite_params = params.copy()
+
+            if metrics['f1_macro'] > best_f1_macro:
+                best_f1_macro = metrics['f1_macro']
+                best_f1_macro_params = params.copy()
+
+            if metrics['top_3_accuracy'] > best_top3:
+                best_top3 = metrics['top_3_accuracy']
+                best_top3_params = params.copy()
+
+            if metrics['accuracy'] > best_accuracy:
+                best_accuracy = metrics['accuracy']
+                best_accuracy_params = params.copy()
+
             if self.verbose:
                 print(f"  F1-macro: {metrics['f1_macro']:.4f} | "
                       f"Top-3: {metrics['top_3_accuracy']:.4f} | "
                       f"Composite: {metrics['composite_score']:.4f} | "
                       f"Time: {train_time:.1f}s")
 
+            # Сохраняем промежуточные результаты
+            if save_intermediate and i % 5 == 0:
+                self.save_results()
+                print(f"  📁 Промежуточные результаты сохранены ({i}/{total})")
+
+        # Сохраняем информацию о лучших моделях
+        self.best_model_info = {
+            'by_composite': {'params': best_composite_params, 'score': best_composite},
+            'by_f1_macro': {'params': best_f1_macro_params, 'score': best_f1_macro},
+            'by_top_3': {'params': best_top3_params, 'score': best_top3},
+            'by_accuracy': {'params': best_accuracy_params, 'score': best_accuracy},
+            'total_combinations': total,
+            'completed_at': datetime.now().isoformat()
+        }
+
+        # Сохраняем финальные результаты
+        self.save_results()
+
         return self.get_results()
 
     def get_results(self) -> pd.DataFrame:
         """Возвращает результаты в виде DataFrame"""
         df = pd.DataFrame(self.results)
-        return df.sort_values('composite_score', ascending=False)
+        if len(df) > 0:
+            return df.sort_values('composite_score', ascending=False)
+        return df
 
     def get_best_params(self, metric: str = 'composite_score') -> Dict[str, Any]:
         """Возвращает лучшие параметры по выбранной метрике"""
         results = self.get_results()
+        if len(results) == 0:
+            raise ValueError("Нет результатов. Сначала запустите fit()")
+
         best_row = results.loc[results[metric].idxmax()]
         params = {k: best_row[k] for k in self.param_grid.keys()}
 
@@ -145,21 +221,91 @@ class XGBoostGridSearch:
 
         return params
 
-    def save_results(self, filepath: Optional[Path] = None):
-        """Сохраняет результаты в CSV"""
+    def save_results(self, filepath: Optional[Path] = None, name: Optional[str] = None) -> Path:
+        """
+        Сохраняет результаты в CSV
+
+        Args:
+            filepath: полный путь к файлу (если указан, приоритет выше)
+            name: имя файла (сохраняется в директорию по умолчанию)
+
+        Returns:
+            Путь к сохранённому файлу
+        """
         df = self.get_results()
 
-        if filepath is None:
-            filepath = paths.xgboost_mono_grid_search_dir / "grid_search_results.csv"
+        if len(df) == 0:
+            print("⚠️ Нет результатов для сохранения")
+            return None
 
-        filepath = Path(filepath)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        df.to_csv(filepath, index=False)
-        print(f"✅ Результаты Grid Search сохранены: {filepath}")
+        # Определяем путь для сохранения
+        if filepath is not None:
+            save_path = Path(filepath)
+        elif name is not None:
+            save_path = self._get_default_path(name)
+        else:
+            save_path = self._get_default_path()
+
+        save_path = Path(save_path)
+        if save_path.suffix != '.csv':
+            save_path = save_path.with_suffix('.csv')
+
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(save_path, index=False)
+
+        print(f"✅ Результаты Grid Search сохранены: {save_path}")
+
+        # Также сохраняем JSON с метаданными
+        meta_path = save_path.with_suffix('.meta.json')
+        if self.best_model_info:
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(self.best_model_info, f, indent=2, ensure_ascii=False)
+            print(f"✅ Метаданные сохранены: {meta_path}")
+
+        return save_path
+
+    def load_results(self, filepath: Optional[Path] = None, name: Optional[str] = None) -> pd.DataFrame:
+        """
+        Загружает результаты из CSV
+
+        Args:
+            filepath: полный путь к файлу (если указан, приоритет выше)
+            name: имя файла (загружается из директории по умолчанию)
+
+        Returns:
+            DataFrame с результатами
+        """
+        # Определяем путь для загрузки
+        if filepath is not None:
+            load_path = Path(filepath)
+        elif name is not None:
+            load_path = self._get_default_path(name)
+        else:
+            load_path = self._get_default_path()
+
+        load_path = Path(load_path)
+
+        if not load_path.exists():
+            # Пробуем без расширения
+            alt_path = load_path.with_suffix('')
+            if alt_path.exists():
+                load_path = alt_path
+            else:
+                raise FileNotFoundError(f"Файл не найден: {load_path}")
+
+        df = pd.read_csv(load_path)
+        self.results = df.to_dict('records')
+
+        print(f"✅ Результаты загружены: {load_path}")
+        print(f"   Всего записей: {len(df)}")
+
+        return df
 
     def get_best_by_metric(self) -> Dict[str, Dict[str, Any]]:
         """Возвращает лучшие модели по разным метрикам"""
         results = self.get_results()
+        if len(results) == 0:
+            return {}
 
         return {
             'by_composite': {
@@ -180,8 +326,37 @@ class XGBoostGridSearch:
             }
         }
 
+    def print_summary(self):
+        """Выводит сводку о результатах Grid Search"""
+        if len(self.results) == 0:
+            print("Нет результатов. Сначала запустите fit()")
+            return
 
-# Предопределённые сетки параметров
+        results_df = self.get_results()
+
+        print("=" * 70)
+        print("СВОДКА GRID SEARCH")
+        print("=" * 70)
+        print(f"Всего комбинаций: {len(self.results)}")
+        print(f"Лучший composite_score: {results_df.iloc[0]['composite_score']:.4f}")
+        print(f"Лучший F1-macro: {results_df['f1_macro'].max():.4f}")
+        print(f"Лучший Top-3: {results_df['top_3_acc'].max():.4f}")
+        print(f"Лучший Accuracy: {results_df['accuracy'].max():.4f}")
+        print("-" * 70)
+
+        if self.best_model_info:
+            print("\nЛучшие параметры по каждой метрике:")
+            for metric, info in self.best_model_info.items():
+                if info['params']:
+                    print(f"  {metric}: score={info['score']:.4f}")
+        print("=" * 70)
+
+
+GRID_TEST = {
+    'max_depth': [3, 5],
+    'n_estimators': [50, 100]
+}
+
 GRID_SMALL = {
     'max_depth': [3, 5, 7],
     'n_estimators': [50, 100, 150],
