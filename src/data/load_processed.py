@@ -9,7 +9,7 @@ import numpy as np
 import pickle
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 
 from src.data.config import paths
@@ -92,6 +92,14 @@ class LoadProcessedData:
         y_val = np.load(self.cache_dir / 'y_val.npy')
         y_test = np.load(self.cache_dir / 'y_test.npy')
 
+        train_indices_path = self.cache_dir / 'train_indices.npy'
+        if train_indices_path.exists():
+            train_indices = np.load(train_indices_path)
+            val_indices = np.load(self.cache_dir / 'val_indices.npy')
+            test_indices = np.load(self.cache_dir / 'test_indices.npy')
+        else:
+            train_indices = val_indices = test_indices = None
+
         # Загружаем метаданные
         with open(self.cache_dir / 'metadata.json', 'r') as f:
             metadata = json.load(f)
@@ -115,6 +123,9 @@ class LoadProcessedData:
             'y_train': y_train,
             'y_val': y_val,
             'y_test': y_test,
+            'train_indices': train_indices,
+            'val_indices': val_indices,
+            'test_indices': test_indices,
             'label_encoder': label_encoder,
             'scaler': scaler,
             'genre_names': metadata.get('class_names', []),
@@ -180,7 +191,21 @@ class LoadProcessedData:
         print(f"\nЖанры: {', '.join(meta.get('class_names', [])[:5])}...")
 
 
-# Удобная функция для быстрого импорта
+def load_track_indices(
+        subset: Optional[str] = None,
+        min_samples_per_genre: int = 100
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Быстрая загрузка индексов треков для train/val/test
+
+    Returns:
+        (train_indices, val_indices, test_indices)
+    """
+    loader = LoadProcessedData(subset=subset, min_samples_per_genre=min_samples_per_genre)
+    data = loader.load()
+    return data['train_indices'], data['val_indices'], data['test_indices']
+
+
 def load_data(
         subset: Optional[str] = None,
         min_samples_per_genre: int = 100,

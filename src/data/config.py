@@ -230,6 +230,43 @@ class Paths:
         return path
 
     # ========================================================================
+    # Аудио фичи (MFCC, спектрограммы) — кэш для CNN
+    # ========================================================================
+
+    @property
+    def audio_features_dir(self) -> Path:
+        """Директория для кэшированных аудио-фич"""
+        path = self.processed_data_dir / "audio_features"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def mfcc_cache_dir(self) -> Path:
+        """Директория для кэша MFCC"""
+        path = self.audio_features_dir / "mfcc"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def spectrogram_cache_dir(self) -> Path:
+        """Директория для кэша спектрограмм"""
+        path = self.audio_features_dir / "spectrograms"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def waveform_cache_dir(self) -> Path:
+        """Директория для кэша"""
+        path = self.audio_features_dir / "waveforms"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    @property
+    def audio_metadata_file(self) -> Path:
+        """Файл с метаданными аудио (какие треки закэшированы)"""
+        return self.audio_features_dir / "audio_metadata.json"
+
+    # ========================================================================
     # Конкретные файлы
     # ========================================================================
 
