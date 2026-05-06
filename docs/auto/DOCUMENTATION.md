@@ -1,59 +1,59 @@
 # Auto-Generated Documentation
 
-> **PR:** #2 - XGBoost baseline (mono-classification)
+> **PR:** #3 - Data processing pipeline for CNN
 > **Author:** @egor-zasmuzhets
-> **Generated:** 2026-05-04 07:56:52 UTC
+> **Generated:** 2026-05-06 09:32:59 UTC
 
 
-## 📄 `configs/audio.yaml`
+## 📄 `src/data/audio_loader.py`
 
-**Description:** This YAML code defines a set of audio processing parameters, including sample rate, duration, and various spectral features such as n_fft, hop_length, and mel-frequency cepstral coefficients (MFCCs). It also specifies augmentation techniques like time stretching, pitch shifting, and noise addition.
+**Description:** The provided Python code is for an AudioLoader class, which is designed to load audio files from ZIP archives. It supports loading MP3 files directly from ZIP without unpacking, caching loaded tracks, trimming audio to a specified duration, and saving the cache to disk for reuse. The class also provides methods for loading audio with status, loading audio in batches, getting available tracks, and generating reports for failed tracks.
 
-**Functions:** None
+**Functions:** load_audio_with_status, load_audio, load_audio_batch_with_status, get_available_tracks, get_failed_tracks_report
 
-**Classes:** None
+**Classes:** AudioLoader
 
-**Dependencies:** librosa, pydub
-
----
-
-## 📄 `configs/model_config.yaml`
-
-**Description:** This YAML code defines a configuration for training an XGBoost model for music genre classification. It includes model parameters, training settings, selection metrics, and data configuration.
-
-**Functions:** None
-
-**Classes:** None
-
-**Dependencies:** xgboost
+**Dependencies:** zipfile, io, librosa, numpy, pathlib, hashlib
 
 ---
 
 ## 📄 `src/data/config.py`
 
-**Description:** This Python code is used for managing project configurations, including defining the project root, loading YAML configuration files, and providing paths to various directories and files. It includes classes for handling configurations, paths, and audio parameters.
+**Description:** This code defines classes and functions for managing paths, configurations, and audio parameters. It provides methods for resolving paths, loading configurations, and accessing various directories and files.
 
-**Functions:** find_project_root, load, reload, ensure_dirs, print_info, to_dict
+**Functions:** find_project_root, load, reload, _resolve, _get_dir, metadata_dir, active_zip, active_subset, get_fma_zip, raw_data_dir, processed_data_dir, external_data_dir, checkpoints_dir, results_dir, models_dir, logs_dir, configs_dir, xgboost_mono_dir, xgboost_mono_models_dir, xgboost_mono_plots_dir, xgboost_mono_grid_search_dir, xgboost_mono_metrics_dir, xgboost_multi_dir, xgboost_multi_models_dir, xgboost_multi_plots_dir, xgboost_multi_metrics_dir, audio_features_dir, mfcc_cache_dir, spectrogram_cache_dir, waveform_cache_dir, audio_metadata_file, get_tracks_csv, get_features_csv, get_genres_csv, ensure_dirs, print_info, sample_rate, duration, n_fft, hop_length, win_length, n_mels, fmin, fmax, n_mfcc, n_chroma, n_bands, augmentation, to_dict
 
 **Classes:** Config, Paths, AudioParams
 
-**Dependencies:** yaml, pathlib, typing
+**Dependencies:** Optional, Path, Dict, Any
 
 ---
 
-## 📄 `src/models/xgboost_model.py`
+## 📄 `src/data/load_processed.py`
 
-**Description:** This code defines a class XGBoostGenreClassifier for music genre classification using XGBoost. It supports training with/without class weights, early stopping on validation, saving/loading models, and comprehensive evaluation metrics.
+**Description:** This code defines a class LoadProcessedData, which appears to be responsible for loading and managing processed data. It includes methods for checking the existence of data, loading data, and printing information.
 
-**Functions:** _get_default_path, _get_sample_weights, fit, predict, predict_proba, top_k_accuracy, confidence_analysis, _compute_composite_score, comprehensive_evaluate, get_feature_importance, save, load, print_summary
+**Functions:** _get_cache_file, _get_metadata_path, exists, load, load_to_dataframe, print_info, load_track_indices, load_data
 
-**Classes:** XGBoostGenreClassifier
+**Classes:** LoadProcessedData
 
-**Dependencies:** json, yaml, numpy, pandas, xgboost, pathlib, sklearn
+**Dependencies:** Path, Dict, Any
 
 ---
 
-## 📄 `src/training/analyzer.py`
+## 📄 `src/data/mfcc_extractor.py`
+
+**Description:** This code is used for extracting Mel-Frequency Cepstral Coefficients (MFCC) from audio data. It provides a class-based structure for handling MFCC extraction, including configuration, caching, and preparation for CNN input.
+
+**Functions:** extract_from_audio, extract_from_track_id_with_status, extract_from_track_id, get_mfcc_matrix_with_status, get_mfcc_matrix, get_mfcc_with_deltas_with_status, get_mfcc_with_deltas, prepare_for_cnn_with_status, prepare_for_cnn, extract_batch_with_status, get_failed_tracks_report, clear_cache
+
+**Classes:** MFCCConfig, MFCCExtractor
+
+**Dependencies:** numpy, librosa, typing, dataclasses, hashlib, pathlib, pickle
+
+---
+
+## 📄 `src/data/pipeline.py`
 
 **Description:** Unable to analyze code (API error)
 
@@ -65,7 +65,7 @@
 
 ---
 
-## 📄 `src/training/grid_search.py`
+## 📄 `src/data/torch_dataset.py`
 
 **Description:** Unable to analyze code (API error)
 
@@ -74,17 +74,5 @@
 **Classes:** None
 
 **Dependencies:** None
-
----
-
-## 📄 `src/training/train_xgboost.py`
-
-**Description:** This script trains an XGBoost model for mono classification. It loads data, trains the model, performs a comprehensive evaluation, and saves the results.
-
-**Functions:** main, load_data, XGBoostGenreClassifier, XGBoostGridSearch, ModelAnalyzer
-
-**Classes:** XGBoostGenreClassifier, XGBoostGridSearch, ModelAnalyzer
-
-**Dependencies:** numpy, argparse, json, pathlib, datetime
 
 ---
