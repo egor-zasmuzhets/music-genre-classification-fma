@@ -2,54 +2,90 @@
 
 > **PR:** #3 - Data processing pipeline for CNN
 > **Author:** @egor-zasmuzhets
-> **Generated:** 2026-05-06 09:32:59 UTC
+> **Generated:** 2026-05-14 12:15:40 UTC
 
 
-## 📄 `src/data/audio_loader.py`
+## 📄 `configs/models.yaml`
 
-**Description:** The provided Python code is for an AudioLoader class, which is designed to load audio files from ZIP archives. It supports loading MP3 files directly from ZIP without unpacking, caching loaded tracks, trimming audio to a specified duration, and saving the cache to disk for reuse. The class also provides methods for loading audio with status, loading audio in batches, getting available tracks, and generating reports for failed tracks.
+**Description:** This YAML code defines the configuration for two machine learning models: xgboost_mono and cnn_mfcc_mono. The xgboost_mono model is an XGBoost classifier for music genre classification, while the cnn_mfcc_mono model is a CNN with MFCC features for the same task. The configuration includes model parameters, training settings, and file paths.
 
-**Functions:** load_audio_with_status, load_audio, load_audio_batch_with_status, get_available_tracks, get_failed_tracks_report
+**Functions:** None
 
-**Classes:** AudioLoader
+**Classes:** None
 
-**Dependencies:** zipfile, io, librosa, numpy, pathlib, hashlib
+**Dependencies:** xgboost, cnn
 
 ---
 
-## 📄 `src/data/config.py`
+## 📄 `configs/paths.yaml`
 
-**Description:** This code defines classes and functions for managing paths, configurations, and audio parameters. It provides methods for resolving paths, loading configurations, and accessing various directories and files.
+**Description:** This YAML code defines the configuration for a music genre classification project. It specifies the project root directory, external data sources, and the structure of the project directories.
 
-**Functions:** find_project_root, load, reload, _resolve, _get_dir, metadata_dir, active_zip, active_subset, get_fma_zip, raw_data_dir, processed_data_dir, external_data_dir, checkpoints_dir, results_dir, models_dir, logs_dir, configs_dir, xgboost_mono_dir, xgboost_mono_models_dir, xgboost_mono_plots_dir, xgboost_mono_grid_search_dir, xgboost_mono_metrics_dir, xgboost_multi_dir, xgboost_multi_models_dir, xgboost_multi_plots_dir, xgboost_multi_metrics_dir, audio_features_dir, mfcc_cache_dir, spectrogram_cache_dir, waveform_cache_dir, audio_metadata_file, get_tracks_csv, get_features_csv, get_genres_csv, ensure_dirs, print_info, sample_rate, duration, n_fft, hop_length, win_length, n_mels, fmin, fmax, n_mfcc, n_chroma, n_bands, augmentation, to_dict
+**Functions:** None
 
-**Classes:** Config, Paths, AudioParams
+**Classes:** None
 
-**Dependencies:** Optional, Path, Dict, Any
+**Dependencies:** yaml
+
+---
+
+## 📄 `src/data/__init__.py`
+
+**Description:** This module provides data loading, preprocessing, and caching functionality for the FMA dataset. It includes classes and functions for loading and processing audio data, as well as utilities for creating data loaders and pipelines.
+
+**Functions:** __getattr__, load_data, load_track_indices, list_datasets
+
+**Classes:** FMALoader, DataPreprocessor, DataPipeline, LoadProcessedData, MFCCDataset, MFCCAugmentation, MFCCExtractor, MFCCConfig, AudioLoader
+
+**Dependencies:** logging, typing, src.data.torch_dataset, src.data.mfcc_extractor, src.data.audio_loader, src.data.loader, src.data.preprocessor, src.data.pipeline, src.data.load_processed
+
+---
+
+## 📄 `src/data/audio_loader.py`
+
+**Description:** This code defines a class called AudioLoader that loads audio files from FMA ZIP archives. It provides features such as lazy ZIP access, multi-level caching, automatic resampling, and detailed status reporting.
+
+**Functions:** load_audio_with_status, load_audio, load_audio_batch_with_status, get_available_tracks, get_failed_tracks_report, close, clear_cache, clear_disk_cache
+
+**Classes:** AudioLoader
+
+**Dependencies:** librosa, numpy, zipfile, pathlib, logging, hashlib, io
 
 ---
 
 ## 📄 `src/data/load_processed.py`
 
-**Description:** This code defines a class LoadProcessedData, which appears to be responsible for loading and managing processed data. It includes methods for checking the existence of data, loading data, and printing information.
+**Description:** This module provides functions for loading preprocessed data from cache. It supports multiple dataset configurations identified by subset and minimum samples per genre.
 
-**Functions:** _get_cache_file, _get_metadata_path, exists, load, load_to_dataframe, print_info, load_track_indices, load_data
+**Functions:** load_data, load_track_indices, list_datasets
 
 **Classes:** LoadProcessedData
 
-**Dependencies:** Path, Dict, Any
+**Dependencies:** json, logging, pathlib, numpy, pandas, joblib
+
+---
+
+## 📄 `src/data/loader.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
 
 ---
 
 ## 📄 `src/data/mfcc_extractor.py`
 
-**Description:** This code is used for extracting Mel-Frequency Cepstral Coefficients (MFCC) from audio data. It provides a class-based structure for handling MFCC extraction, including configuration, caching, and preparation for CNN input.
+**Description:** Unable to analyze code (API error)
 
-**Functions:** extract_from_audio, extract_from_track_id_with_status, extract_from_track_id, get_mfcc_matrix_with_status, get_mfcc_matrix, get_mfcc_with_deltas_with_status, get_mfcc_with_deltas, prepare_for_cnn_with_status, prepare_for_cnn, extract_batch_with_status, get_failed_tracks_report, clear_cache
+**Functions:** None
 
-**Classes:** MFCCConfig, MFCCExtractor
+**Classes:** None
 
-**Dependencies:** numpy, librosa, typing, dataclasses, hashlib, pathlib, pickle
+**Dependencies:** None
 
 ---
 
@@ -65,7 +101,139 @@
 
 ---
 
+## 📄 `src/data/preprocessor.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
 ## 📄 `src/data/torch_dataset.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/models/cnn_mfcc_debug.py`
+
+**Description:** This code defines a minimal 2D convolutional neural network (CNN) model for debugging and rapid prototyping of data pipelines, specifically designed for Mel-Frequency Cepstral Coefficients (MFCC) inputs.
+
+**Functions:** forward, save, load, get_num_parameters, print_info
+
+**Classes:** MiniCNN
+
+**Dependencies:** torch, torch.nn, logging, pathlib
+
+---
+
+## 📄 `src/models/xgboost_model.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/training/analyzer.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/training/grid_search.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/training/metrics_tracker_debug.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/training/train_cnn_debug.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/training/train_xgboost.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/utils/__init__.py`
+
+**Description:** This module provides project-wide utilities, including centralized project path management, audio processing parameters, logging configuration, and mixin classes for easy logger access.
+
+**Functions:** setup_logging, get_logging_config
+
+**Classes:** LoggingConfig, LoggingMixin
+
+**Dependencies:** logging, src.utils.config, src.utils.logging_utils
+
+---
+
+## 📄 `src/utils/config.py`
+
+**Description:** Unable to analyze code (API error)
+
+**Functions:** None
+
+**Classes:** None
+
+**Dependencies:** None
+
+---
+
+## 📄 `src/utils/logging_utils.py`
 
 **Description:** Unable to analyze code (API error)
 
