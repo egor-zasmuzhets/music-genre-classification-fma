@@ -9,6 +9,11 @@ external_data:
   active_subset: "medium"
   active_zip: "E:/music-genre-classifier/fma_medium.zip"
 
+zip_structure:
+    template: "fma_{subset}/{folder}/{track_id}.mp3"
+    track_id_padding: 6
+    folder_chars: 3
+
 project_dirs:
   data:
     raw: "./data/raw"
