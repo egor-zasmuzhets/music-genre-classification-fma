@@ -1,5 +1,4 @@
 """
-src/training/grid_search.py
 Grid search for XGBoost hyperparameter tuning with comprehensive metrics.
 
 Evaluates every parameter combination against multiple metrics including
@@ -35,10 +34,6 @@ from src.utils.config import paths
 logger = logging.getLogger(__name__)
 
 
-# ============================================================================
-# PREDEFINED GRID SIZES
-# ============================================================================
-
 GRID_TEST = {
     "max_depth": [3, 5],
     "n_estimators": [50, 100],
@@ -70,10 +65,6 @@ GRID_FULL = {
 }
 
 
-# ============================================================================
-# GRID SEARCH CLASS
-# ============================================================================
-
 class XGBoostGridSearch:
     """
     Exhaustive hyperparameter search for XGBoost with multi-metric evaluation.
@@ -100,7 +91,7 @@ class XGBoostGridSearch:
         param_grid: Dict[str, List[Any]],
         use_class_weights: bool = True,
         results_name: Optional[str] = None,
-    ):
+    ) -> None:
         """
         Initialize the grid search.
 
@@ -154,10 +145,6 @@ class XGBoostGridSearch:
         """Generate all parameter combinations from the grid."""
         return list(ParameterGrid(self.param_grid))
 
-    # ------------------------------------------------------------------
-    # Main fit loop
-    # ------------------------------------------------------------------
-
     def fit(
         self,
         X_train: np.ndarray,
@@ -207,8 +194,6 @@ class XGBoostGridSearch:
         for i, params in enumerate(param_combinations, 1):
             start_time = time.time()
 
-            logger.debug("[%d/%d] Testing: %s", i, total, params)
-
             model = XGBoostGenreClassifier(
                 params=params,
                 use_class_weights=self.use_class_weights,
@@ -240,7 +225,6 @@ class XGBoostGridSearch:
             }
             self.results.append(result)
 
-            # Track best by each metric
             if metrics["composite_score"] > best_composite:
                 best_composite = metrics["composite_score"]
                 best_composite_params = params.copy()
@@ -266,12 +250,9 @@ class XGBoostGridSearch:
                 train_time,
             )
 
-            # Save intermediate results
             if save_intermediate and i % 5 == 0:
                 self.save_results()
-                logger.debug("Intermediate results saved (%d/%d)", i, total)
 
-        # Store best model info
         self.best_model_info = {
             "by_composite": {
                 "params": best_composite_params,
@@ -305,10 +286,6 @@ class XGBoostGridSearch:
         )
 
         return self.get_results()
-
-    # ------------------------------------------------------------------
-    # Results access
-    # ------------------------------------------------------------------
 
     def get_results(self) -> pd.DataFrame:
         """
@@ -353,7 +330,6 @@ class XGBoostGridSearch:
             best_row["top_3_acc"],
             best_row["accuracy"],
         )
-        logger.debug("Best params: %s", params)
 
         return params
 
@@ -383,10 +359,6 @@ class XGBoostGridSearch:
             "by_top_3": _best_row("top_3_acc"),
             "by_accuracy": _best_row("accuracy"),
         }
-
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
 
     def save_results(
         self,
@@ -475,10 +447,6 @@ class XGBoostGridSearch:
         )
 
         return df
-
-    # ------------------------------------------------------------------
-    # Info
-    # ------------------------------------------------------------------
 
     def print_info(self) -> None:
         """

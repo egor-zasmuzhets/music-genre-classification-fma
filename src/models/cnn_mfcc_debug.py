@@ -1,5 +1,4 @@
 """
-src/models/cnn_mfcc_debug.py
 Minimal CNN model for data pipeline debugging and rapid prototyping.
 
 A lightweight 2D convolutional architecture that works with MFCC inputs
@@ -52,7 +51,7 @@ class MiniCNN(nn.Module):
         n_mfcc: int = 20,
         n_classes: int = 10,
         dropout: float = 0.3,
-    ):
+    ) -> None:
         """
         Initialize the debug CNN.
 
@@ -67,7 +66,6 @@ class MiniCNN(nn.Module):
         self.n_classes = n_classes
         self.dropout_rate = dropout
 
-        # Convolutional blocks
         self.conv1 = nn.Conv2d(1, 16, kernel_size=(3, 3), padding=1)
         self.bn1 = nn.BatchNorm2d(16)
 
@@ -76,10 +74,8 @@ class MiniCNN(nn.Module):
 
         self.pool = nn.MaxPool2d(2, 2)
 
-        # Fixed-size output before FC via adaptive pooling
         self.global_pool = nn.AdaptiveAvgPool2d((4, 8))
 
-        # Classifier head
         self.fc = nn.Linear(32 * 4 * 8, n_classes)
 
         self.relu = nn.ReLU()
@@ -98,13 +94,13 @@ class MiniCNN(nn.Module):
 
         Args:
             x: Input tensor. Can be 3D (B, n_mfcc, frames) or 4D
-               (B, 1, n_mfcc, frames). If 3D, a channel dimension
-               is inserted automatically.
+               (B, channels, n_mfcc, frames). If 3D, a channel dimension
+               is inserted automatically. If 4D with channels > 1, the
+               channel dimension is used as-is (no unsqueeze).
 
         Returns:
             Logits tensor of shape (B, n_classes).
         """
-        # Ensure channel dimension: (B, n_mfcc, frames) -> (B, 1, n_mfcc, frames)
         if x.dim() == 3:
             x = x.unsqueeze(1)
 

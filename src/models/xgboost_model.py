@@ -1,5 +1,4 @@
 """
-src/models/xgboost_model.py
 XGBoost classifier for music genre classification with comprehensive evaluation.
 
 Provides training with optional class weights, early stopping on validation,
@@ -71,7 +70,7 @@ class XGBoostGenreClassifier:
         use_class_weights: bool = True,
         random_state: int = 42,
         model_name: Optional[str] = None,
-    ):
+    ) -> None:
         """
         Initialize the XGBoost classifier.
 
@@ -112,10 +111,6 @@ class XGBoostGenreClassifier:
             use_class_weights,
         )
 
-    # ------------------------------------------------------------------
-    # Path helpers
-    # ------------------------------------------------------------------
-
     @property
     def _default_save_dir(self) -> Path:
         """Directory where model files are saved by default."""
@@ -137,10 +132,6 @@ class XGBoostGenreClassifier:
             name = name + ".json"
         return self._default_save_dir / name
 
-    # ------------------------------------------------------------------
-    # Training
-    # ------------------------------------------------------------------
-
     def _get_sample_weights(self, y_train: np.ndarray) -> Optional[np.ndarray]:
         """
         Compute per-sample weights for imbalanced classes.
@@ -160,11 +151,14 @@ class XGBoostGenreClassifier:
 
         sample_weights = np.array([self.class_weights[y] for y in y_train])
 
+        min_w = min(weights) if len(weights) > 0 else 0.0
+        max_w = max(weights) if len(weights) > 0 else 0.0
+
         logger.info(
             "Class weights computed — min=%.3f, max=%.3f, ratio=%.1f:1",
-            min(weights),
-            max(weights),
-            max(weights) / min(weights) if min(weights) > 0 else float("inf"),
+            min_w,
+            max_w,
+            max_w / min_w if min_w > 0 else float("inf"),
         )
 
         return sample_weights
@@ -211,7 +205,7 @@ class XGBoostGenreClassifier:
             eval_metric="mlogloss",
         )
 
-        eval_set = [(X_val, y_val)] if X_val is not None else None
+        eval_set = [(X_val, y_val)] if X_val is not None and y_val is not None else None
 
         self.sklearn_model.fit(
             X_train,
@@ -224,18 +218,16 @@ class XGBoostGenreClassifier:
         self.model = self.sklearn_model.get_booster()
         self._is_fitted = True
 
+        best_iter = getattr(self.sklearn_model, "best_iteration", None)
+        best_score = getattr(self.sklearn_model, "best_score", float("nan"))
+
         logger.info(
-            "Training complete — best_iteration=%s, "
-            "best_score=%.4f",
-            getattr(self.sklearn_model, "best_iteration", None),
-            getattr(self.sklearn_model, "best_score", float("nan")),
+            "Training complete — best_iteration=%s, best_score=%.4f",
+            best_iter,
+            best_score,
         )
 
         return self
-
-    # ------------------------------------------------------------------
-    # Prediction
-    # ------------------------------------------------------------------
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """
@@ -273,10 +265,6 @@ class XGBoostGenreClassifier:
         """Raise RuntimeError if the model is not fitted."""
         if not self._is_fitted:
             raise RuntimeError("Model has not been fitted. Call fit() or load() first.")
-
-    # ------------------------------------------------------------------
-    # Evaluation
-    # ------------------------------------------------------------------
 
     def top_k_accuracy(
         self,
@@ -332,12 +320,18 @@ class XGBoostGenreClassifier:
         correct_conf = max_proba[is_correct]
         wrong_conf = max_proba[~is_correct]
 
+        correct_mean = float(correct_conf.mean()) if len(correct_conf) > 0 else 0.0
+        correct_std = float(correct_conf.std()) if len(correct_conf) > 0 else 0.0
+        wrong_mean = float(wrong_conf.mean()) if len(wrong_conf) > 0 else 0.0
+        wrong_std = float(wrong_conf.std()) if len(wrong_conf) > 0 else 0.0
+        gap = correct_mean - wrong_mean if len(wrong_conf) > 0 else 0.0
+
         return {
-            "confidence_correct_mean": float(correct_conf.mean()) if len(correct_conf) > 0 else 0.0,
-            "confidence_correct_std": float(correct_conf.std()) if len(correct_conf) > 0 else 0.0,
-            "confidence_wrong_mean": float(wrong_conf.mean()) if len(wrong_conf) > 0 else 0.0,
-            "confidence_wrong_std": float(wrong_conf.std()) if len(wrong_conf) > 0 else 0.0,
-            "confidence_gap": float(correct_conf.mean() - wrong_conf.mean()) if len(wrong_conf) > 0 else 0.0,
+            "confidence_correct_mean": correct_mean,
+            "confidence_correct_std": correct_std,
+            "confidence_wrong_mean": wrong_mean,
+            "confidence_wrong_std": wrong_std,
+            "confidence_gap": gap,
             "low_confidence_count": int(np.sum(max_proba < 0.5)),
             "low_confidence_rate": float(np.mean(max_proba < 0.5)),
         }
@@ -441,10 +435,6 @@ class XGBoostGenreClassifier:
 
         return metrics
 
-    # ------------------------------------------------------------------
-    # Feature importance
-    # ------------------------------------------------------------------
-
     def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
         """
         Return the most important features according to the model.
@@ -475,13 +465,9 @@ class XGBoostGenreClassifier:
             "importance": importance,
         }).sort_values("importance", ascending=False)
 
-        logger.debug("Top-%d feature importance extracted", top_n)
+        logger.info("Top-%d feature importance extracted", top_n)
 
         return df.head(top_n)
-
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
 
     def save(
         self,
@@ -631,10 +617,6 @@ class XGBoostGenreClassifier:
             f"Available: {available if available else 'none'}"
         )
 
-    # ------------------------------------------------------------------
-    # Info
-    # ------------------------------------------------------------------
-
     def print_info(self) -> None:
         """
         Print a human-readable summary of the model state.
@@ -655,6 +637,7 @@ class XGBoostGenreClassifier:
         print(f"Learning rate:   {self.params.get('learning_rate', '?')}")
         print(f"Class weights:   {self.use_class_weights}")
         if self.class_weights:
-            print(f"Weight range:    {min(self.class_weights.values()):.3f} – "
-                  f"{max(self.class_weights.values()):.3f}")
+            min_w = min(self.class_weights.values())
+            max_w = max(self.class_weights.values())
+            print(f"Weight range:    {min_w:.3f} – {max_w:.3f}")
         print("=" * 60)

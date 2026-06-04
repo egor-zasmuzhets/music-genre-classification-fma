@@ -1,5 +1,4 @@
 """
-src/training/train_xgboost.py
 XGBoost training script with comprehensive evaluation (mono classification).
 
 Orchestrates data loading, model training (or grid search), evaluation,
@@ -20,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
+from matplotlib import pyplot as plt
 
 from src.data.load_processed import load_data
 from src.models.xgboost_model import XGBoostGenreClassifier
@@ -30,10 +30,6 @@ from src.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================================
-# COMMAND-LINE INTERFACE
-# ============================================================================
 
 def build_parser() -> argparse.ArgumentParser:
     """
@@ -55,8 +51,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="FMA subset to use (default: medium)"
     )
     parser.add_argument(
-        "--min_samples", type=int, default=100,
-        help="Minimum tracks per genre (default: 100)"
+        "--min_samples", type=int, default=10,
+        help="Minimum tracks per genre (default: 10)"
     )
     parser.add_argument(
         "--no_weights", action="store_true",
@@ -79,10 +75,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# ============================================================================
-# DATA LOADING
-# ============================================================================
-
 def load_and_report_data(
     subset: str,
     min_samples: int,
@@ -102,7 +94,7 @@ def load_and_report_data(
     data = load_data(subset=subset, min_samples_per_genre=min_samples)
 
     X_train, X_val, X_test = data["X_train"], data["X_val"], data["X_test"]
-    y_train, y_val, y_test = data["y_train"], data["y_val"], data["y_test"]
+    y_train = data["y_train"]
     genre_names = data["genre_names"]
 
     logger.info(
@@ -110,7 +102,6 @@ def load_and_report_data(
         X_train.shape, X_val.shape, X_test.shape, len(genre_names)
     )
 
-    # Log class distribution
     unique, counts = np.unique(y_train, return_counts=True)
     distribution_lines = []
     for genre_id, count in zip(unique, counts):
@@ -118,7 +109,7 @@ def load_and_report_data(
         pct = 100 * count / len(y_train)
         distribution_lines.append(f"  {name:20s}: {count:5d} ({pct:5.1f}%)")
 
-    logger.debug(
+    logger.info(
         "Training class distribution:\n%s",
         "\n".join(distribution_lines),
     )
@@ -126,9 +117,13 @@ def load_and_report_data(
     return data
 
 
-# ============================================================================
-# GRID SEARCH
-# ============================================================================
+def _count_combinations(param_grid: Dict[str, list]) -> int:
+    """Count the total number of hyperparameter combinations."""
+    total = 1
+    for values in param_grid.values():
+        total *= len(values)
+    return total
+
 
 def run_grid_search(
     X_train: np.ndarray,
@@ -205,18 +200,6 @@ def run_grid_search(
     return best_params
 
 
-def _count_combinations(param_grid: Dict[str, list]) -> int:
-    """Count the total number of hyperparameter combinations."""
-    total = 1
-    for values in param_grid.values():
-        total *= len(values)
-    return total
-
-
-# ============================================================================
-# EVALUATION & SAVING
-# ============================================================================
-
 def evaluate_and_report(
     model: XGBoostGenreClassifier,
     X_test: np.ndarray,
@@ -269,19 +252,10 @@ def save_results(
     metrics: Dict[str, Any],
     args: argparse.Namespace,
     genre_names: list,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
 ) -> Path:
-    """
-    Persist model, metrics, and generate analysis.
-
-    Args:
-        model: Trained classifier.
-        metrics: Comprehensive evaluation metrics.
-        args: Parsed command-line arguments.
-        genre_names: Genre name strings.
-
-    Returns:
-        Path to the saved metrics JSON file.
-    """
+    """Persist model, metrics, and generate analysis."""
     model.save()
 
     results_dict = {
@@ -294,8 +268,7 @@ def save_results(
         "use_class_weights": not args.no_weights,
         "params": model.params,
         "metrics": {
-            k: v
-            for k, v in metrics.items()
+            k: v for k, v in metrics.items()
             if k not in ("classification_report", "confidence")
         },
         "confidence_analysis": metrics["confidence"],
@@ -305,23 +278,36 @@ def save_results(
 
     metrics_path = paths.xgboost.metrics_dir / "comprehensive_results.json"
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
-
     with open(metrics_path, "w", encoding="utf-8") as f:
         json.dump(results_dict, f, indent=2, ensure_ascii=False)
-
     logger.info("Metrics saved: %s", metrics_path)
 
-    # Generate visual analysis
+    # Анализ значимости признаков
+    feature_importance = model.get_feature_importance(top_n=30)
+    fi_path = paths.xgboost.plots_dir / "feature_importance.csv"
+    feature_importance.to_csv(fi_path)
+    logger.info("Feature importance saved: %s", fi_path)
+
+    # График важности признаков
+    fig, ax = plt.subplots(figsize=(10, 8))
+    top_features = feature_importance.head(20).iloc[::-1]
+    ax.barh(range(len(top_features)), top_features["importance"], color="steelblue")
+    ax.set_yticks(range(len(top_features)))
+    ax.set_yticklabels(top_features["feature"], fontsize=8)
+    ax.set_xlabel("Importance")
+    ax.set_title("Top-20 Feature Importance — XGBoost")
+    plt.tight_layout()
+    plt.savefig(paths.xgboost.plots_dir / "feature_importance.png", dpi=150)
+    plt.close()
+    logger.info("Feature importance plot saved")
+
+    # Полный анализ
     analyzer = ModelAnalyzer(model, genre_names)
-    analysis = analyzer.analyze_predictions(X_test=None, y_test=None)
+    analysis = analyzer.analyze_predictions(X_test, y_test)
     analyzer.print_analysis_report(analysis)
 
     return metrics_path
 
-
-# ============================================================================
-# MAIN
-# ============================================================================
 
 def main() -> Dict[str, Any]:
     """
@@ -356,14 +342,12 @@ def main() -> Dict[str, Any]:
     )
     logger.info("Started: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-    # 1. Load data
     data = load_and_report_data(args.subset, args.min_samples)
 
     X_train, X_val, X_test = data["X_train"], data["X_val"], data["X_test"]
     y_train, y_val, y_test = data["y_train"], data["y_val"], data["y_test"]
     genre_names = data["genre_names"]
 
-    # 2. Grid search or direct training
     if args.grid_search:
         best_params = run_grid_search(
             X_train, y_train,
@@ -383,18 +367,15 @@ def main() -> Dict[str, Any]:
             use_class_weights=not args.no_weights,
         )
 
-    # 3. Train final model
     model.fit(
         X_train, y_train,
         X_val=X_val, y_val=y_val,
         genre_names=genre_names,
     )
 
-    # 4. Evaluate
     metrics = evaluate_and_report(model, X_test, y_test, genre_names)
 
-    # 5. Save
-    metrics_path = save_results(model, metrics, args, genre_names)
+    metrics_path = save_results(model, metrics, args, genre_names, X_test, y_test)
 
     logger.info(
         "Training pipeline complete — model: %s, metrics: %s",

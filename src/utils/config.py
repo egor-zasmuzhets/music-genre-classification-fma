@@ -1,5 +1,4 @@
 """
-src.utils.config.py
 Project configuration management.
 
 Loads YAML configuration files and provides structured access to:
@@ -24,21 +23,15 @@ Usage:
 """
 
 import logging
-import sys
+import shutil
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
 
 import yaml
 
-from src.utils.logging_utils import LoggingMixin, LoggingConfig
-
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================================
-# 1. PROJECT ROOT DETECTION
-# ============================================================================
 
 def find_project_root(start_path: Optional[Path] = None) -> Path:
     """
@@ -74,10 +67,6 @@ def find_project_root(start_path: Optional[Path] = None) -> Path:
 PROJECT_ROOT = find_project_root()
 
 
-# ============================================================================
-# 2. YAML CONFIGURATION LOADER
-# ============================================================================
-
 class Config:
     """
     YAML configuration file loader with caching.
@@ -88,10 +77,9 @@ class Config:
 
     Attributes:
         config_dir: Path to the directory containing YAML config files.
-        _cache: Internal cache mapping filenames to parsed configurations.
     """
 
-    def __init__(self, config_dir: Optional[str] = None):
+    def __init__(self, config_dir: Optional[str] = None) -> None:
         """
         Initialize the configuration loader.
 
@@ -148,10 +136,6 @@ class Config:
 _config = Config()
 
 
-# ============================================================================
-# 3. MODEL-SPECIFIC PATH MANAGEMENT
-# ============================================================================
-
 class ModelPaths:
     """
     Manages directory paths for a specific model.
@@ -163,9 +147,16 @@ class ModelPaths:
     Usage:
         paths.get_model("xgboost_mono").results_dir
         paths.get_model("cnn_mfcc_mono").checkpoints_dir
+
+    Attributes:
+        model_name: Name of the model.
+        config: Model configuration dictionary from models.yaml.
+        results_dir: Directory for experiment results.
+        models_dir: Directory for saved model files.
+        logs_dir: Directory for log files.
     """
 
-    def __init__(self, model_config: Dict[str, Any], model_name: str):
+    def __init__(self, model_config: Dict[str, Any], model_name: str) -> None:
         """
         Initialize model paths from configuration.
 
@@ -209,7 +200,12 @@ class ModelPaths:
 
     @property
     def checkpoints_dir(self) -> Optional[Path]:
-        """Directory for model checkpoints (optional, may be None)."""
+        """
+        Directory for model checkpoints.
+
+        Returns:
+            Path to checkpoints directory, or None if not configured.
+        """
         path = self.config.get("paths", {}).get(
             "checkpoints_dir", f"checkpoints/{self.model_name}"
         )
@@ -283,10 +279,6 @@ class ModelPaths:
         return f"ModelPaths({self.model_name}, base_dir={self.results_dir})"
 
 
-# ============================================================================
-# 4. MAIN PATHS CLASS
-# ============================================================================
-
 class Paths:
     """
     Centralized project path management.
@@ -303,7 +295,7 @@ class Paths:
         paths.list_models()
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize path manager and load configurations."""
         self._raw = _config.load("paths.yaml")
         self._resolved: Dict[str, Path] = {}
@@ -381,8 +373,8 @@ class Paths:
             KeyError: If the model name is not found in models.yaml.
 
         Example:
-            paths.get_model("xgboost_mono").models_dir
-            paths.get_model("cnn_mfcc_mono").checkpoints_dir
+            >>> paths.get_model("xgboost_mono").models_dir
+            >>> paths.get_model("cnn_mfcc_mono").checkpoints_dir
         """
         if model_name not in self._model_instances:
             if model_name not in self._models_config_cache:
@@ -600,8 +592,6 @@ class Paths:
             cache_type: Type of cache to clear.
                         Options: 'all', 'mfcc', 'waveforms', 'spectrograms', 'datasets'.
         """
-        import shutil
-
         cache_targets = {
             "mfcc": self.mfcc_cache_dir,
             "waveforms": self.waveform_cache_dir,
@@ -650,10 +640,6 @@ class Paths:
             print(f"  {model_name}: {model.results_dir}")
 
 
-# ============================================================================
-# 5. AUDIO PARAMETERS
-# ============================================================================
-
 class AudioParams:
     """
     Audio processing parameters loaded from configs/audio.yaml.
@@ -668,7 +654,7 @@ class AudioParams:
         n_mels = audio_params.n_mels
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Load audio configuration from audio.yaml."""
         self._raw = _config.load("audio.yaml")
         logger.debug("AudioParams initialized")
@@ -774,17 +760,9 @@ class AudioParams:
         print(f"  hop_length:   {self.hop_length}")
 
 
-# ============================================================================
-# 6. GLOBAL INSTANCES
-# ============================================================================
-
 paths = Paths()
 audio_params = AudioParams()
 
-
-# ============================================================================
-# 7. MAIN GUARD
-# ============================================================================
 
 if __name__ == "__main__":
     from src.utils.logging_utils import setup_logging

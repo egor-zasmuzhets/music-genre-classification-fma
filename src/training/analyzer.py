@@ -1,10 +1,11 @@
 """
-src/training/analyzer.py
 Model analysis — metrics visualization, error analysis, rare genre diagnostics.
 
 Provides comprehensive post-training analysis for XGBoost classifiers:
 confusion matrix plots, per-class F1 scores, confidence distributions,
 Top-k accuracy curves, and rare vs. common genre quality comparison.
+
+All analysis results are returned as a structured dictionary.
 
 Typical usage:
     from src.training.analyzer import ModelAnalyzer
@@ -12,6 +13,10 @@ Typical usage:
     analyzer = ModelAnalyzer(model, genre_names)
     results = analyzer.analyze_predictions(X_test, y_test)
     analyzer.print_analysis_report(results)
+
+    # Доступ к данным:
+    f1_per_class = results["per_class"]  # {genre: {"f1-score": ..., "precision": ..., ...}}
+    accuracy = results["metrics"]["accuracy"]
 """
 
 import logging
@@ -46,6 +51,7 @@ class ModelAnalyzer:
     - Rare vs. common genre quality gap
 
     All plots can be saved to disk or displayed interactively.
+    All metrics are returned as a structured dictionary.
 
     Attributes:
         model: A fitted classifier with predict() and predict_proba().
@@ -56,7 +62,7 @@ class ModelAnalyzer:
         self,
         model: Any,
         genre_names: List[str],
-    ):
+    ) -> None:
         """
         Initialize the analyzer.
 
@@ -68,14 +74,7 @@ class ModelAnalyzer:
         self.model = model
         self.genre_names = genre_names
 
-        logger.debug(
-            "ModelAnalyzer initialized — %d genres",
-            len(genre_names),
-        )
-
-    # ------------------------------------------------------------------
-    # Full analysis pipeline
-    # ------------------------------------------------------------------
+        logger.debug("ModelAnalyzer initialized — %d genres", len(genre_names))
 
     def analyze_predictions(
         self,
@@ -93,19 +92,50 @@ class ModelAnalyzer:
                       Defaults to paths.xgboost.plots_dir.
 
         Returns:
-            Analysis results dictionary with keys:
-            - metrics: comprehensive evaluation metrics
-            - per_class: per-genre classification report
-            - misclassified_count, misclassified_rate
-            - confidence_correct, confidence_wrong
-            - confusion_pairs: top confused genre pairs
+            Structured dictionary with ALL metrics:
+            {
+                "metrics": {
+                    "accuracy": float,
+                    "f1_macro": float,
+                    "f1_weighted": float,
+                    "f1_micro": float,
+                    "precision_macro": float,
+                    "recall_macro": float,
+                    "top_1_accuracy": float,
+                    "top_3_accuracy": float,
+                    "top_5_accuracy": float,
+                    "composite_score": float,
+                    "roc_auc_ovo": float or None,
+                    "roc_auc_ovr": float or None,
+                },
+                "per_class": {
+                    genre: {
+                        "precision": float,
+                        "recall": float,
+                        "f1-score": float,
+                        "support": int,
+                    }
+                },
+                "per_class_detailed": {
+                    genre: {
+                        "tp": int, "fp": int, "fn": int, "tn": int,
+                    }
+                },
+                "misclassified_count": int,
+                "misclassified_rate": float,
+                "confidence_correct": float,
+                "confidence_wrong": float,
+                "confidence_gap": float,
+                "confusion_pairs": [(true, pred, count), ...],
+                "confusion_matrix": [[int, ...], ...],
+                "y_pred": np.ndarray,
+                "y_pred_proba": np.ndarray,
+            }
         """
         y_pred = self.model.predict(X_test)
         y_pred_proba = self.model.predict_proba(X_test)
 
-        metrics = self.model.comprehensive_evaluate(
-            X_test, y_test, self.genre_names
-        )
+        metrics = self.model.comprehensive_evaluate(X_test, y_test, self.genre_names)
 
         report = classification_report(
             y_test, y_pred,
@@ -118,34 +148,65 @@ class ModelAnalyzer:
         correct_idx = np.where(y_pred == y_test)[0]
 
         max_proba = y_pred_proba.max(axis=1)
-        confidence_correct = (
-            float(max_proba[correct_idx].mean()) if len(correct_idx) > 0 else 0.0
-        )
-        confidence_wrong = (
-            float(max_proba[misclassified_idx].mean()) if len(misclassified_idx) > 0 else 0.0
-        )
+        confidence_correct = float(max_proba[correct_idx].mean()) if len(correct_idx) > 0 else 0.0
+        confidence_wrong = float(max_proba[misclassified_idx].mean()) if len(misclassified_idx) > 0 else 0.0
 
         confusion_pairs = self._analyze_confusions(y_test, y_pred)
+        cm = confusion_matrix(y_test, y_pred)
+        per_class_detailed = self._compute_per_class_detailed(y_test, y_pred)
 
+        n_total = len(y_test)
         results = {
-            "metrics": metrics,
-            "per_class": report,
-            "misclassified_count": len(misclassified_idx),
-            "misclassified_rate": (
-                len(misclassified_idx) / len(y_test) if len(y_test) > 0 else 0.0
-            ),
+            # Общие метрики
+            "metrics": {
+                "accuracy": metrics.get("accuracy", 0),
+                "f1_macro": metrics.get("f1_macro", 0),
+                "f1_weighted": metrics.get("f1_weighted", 0),
+                "f1_micro": metrics.get("f1_micro", 0),
+                "precision_macro": float(np.mean([report[g]["precision"] for g in self.genre_names if g in report])),
+                "recall_macro": float(np.mean([report[g]["recall"] for g in self.genre_names if g in report])),
+                "top_1_accuracy": metrics.get("top_1_accuracy", metrics.get("accuracy", 0)),
+                "top_3_accuracy": metrics.get("top_3_accuracy", 0),
+                "top_5_accuracy": metrics.get("top_5_accuracy", 0),
+                "composite_score": metrics.get("composite_score", 0),
+                "roc_auc_ovo": metrics.get("roc_auc_ovo"),
+                "roc_auc_ovr": metrics.get("roc_auc_ovr"),
+            },
+            # Per-class F1 (из classification_report)
+            "per_class": {
+                genre: {
+                    "precision": report[genre]["precision"] if genre in report else 0.0,
+                    "recall": report[genre]["recall"] if genre in report else 0.0,
+                    "f1-score": report[genre]["f1-score"] if genre in report else 0.0,
+                    "support": int(report[genre]["support"]) if genre in report else 0,
+                }
+                for genre in self.genre_names
+            },
+            # Детальная per-class статистика (матрица ошибок)
+            "per_class_detailed": per_class_detailed,
+            # Статистика ошибок
+            "misclassified_count": int(len(misclassified_idx)),
+            "misclassified_rate": float(len(misclassified_idx) / n_total) if n_total > 0 else 0.0,
+            # Уверенность
             "confidence_correct": confidence_correct,
             "confidence_wrong": confidence_wrong,
+            "confidence_gap": confidence_correct - confidence_wrong,
+            # Топ ошибок
             "confusion_pairs": confusion_pairs,
+            # Матрица ошибок
+            "confusion_matrix": cm.tolist(),
+            # Сырые предсказания (для дальнейшего анализа)
+            "y_pred": y_pred,
+            "y_pred_proba": y_pred_proba,
         }
 
+        # Графики
         if save_dir is None:
             save_dir = paths.xgboost.plots_dir
         else:
             save_dir = Path(save_dir)
 
         save_dir.mkdir(parents=True, exist_ok=True)
-
         logger.info("Generating analysis plots in: %s", save_dir)
 
         self.plot_confusion_matrix(y_test, y_pred, save_dir / "confusion_matrix.png")
@@ -160,271 +221,145 @@ class ModelAnalyzer:
             y_test, y_pred, save_path=save_dir / "rare_genres_analysis.png"
         )
 
-        logger.info("Analysis complete — %d plots saved", 5)
+        logger.info("Analysis complete — 5 plots saved")
 
         return results
 
+    def _compute_per_class_detailed(
+        self, y_true: np.ndarray, y_pred: np.ndarray
+    ) -> Dict[str, Dict[str, int]]:
+        """Вычисляет TP, FP, FN, TN для каждого класса."""
+        detailed = {}
+        for i, genre in enumerate(self.genre_names):
+            tp = int(np.sum((y_pred == i) & (y_true == i)))
+            fp = int(np.sum((y_pred == i) & (y_true != i)))
+            fn = int(np.sum((y_pred != i) & (y_true == i)))
+            tn = int(np.sum((y_pred != i) & (y_true != i)))
+            detailed[genre] = {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
+        return detailed
+
     def _analyze_confusions(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
+        self, y_true: np.ndarray, y_pred: np.ndarray
     ) -> List[Tuple[str, str, int]]:
-        """
-        Extract the most frequently confused genre pairs.
-
-        Args:
-            y_true: Ground truth labels.
-            y_pred: Predicted labels.
-
-        Returns:
-            Top-10 list of (true_genre, predicted_genre, count) tuples,
-            sorted by count descending.
-        """
+        """Extract the most frequently confused genre pairs."""
         cm = confusion_matrix(y_true, y_pred)
-
         confusions = []
-        for i in range(len(self.genre_names)):
-            for j in range(len(self.genre_names)):
+        n_genres = len(self.genre_names)
+        for i in range(n_genres):
+            for j in range(n_genres):
                 if i != j and cm[i, j] > 0:
-                    confusions.append(
-                        (self.genre_names[i], self.genre_names[j], int(cm[i, j]))
-                    )
-
+                    confusions.append((self.genre_names[i], self.genre_names[j], int(cm[i, j])))
         return sorted(confusions, key=lambda x: x[2], reverse=True)[:10]
 
-    # ------------------------------------------------------------------
-    # Plot: Confusion Matrix
-    # ------------------------------------------------------------------
-
     def plot_confusion_matrix(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        save_path: Optional[Path] = None,
+        self, y_true: np.ndarray, y_pred: np.ndarray, save_path: Optional[Path] = None
     ) -> None:
-        """
-        Plot a normalized confusion matrix heatmap.
-
-        Args:
-            y_true: Ground truth labels.
-            y_pred: Predicted labels.
-            save_path: If provided, saves the figure to this path.
-        """
+        """Plot a normalized confusion matrix heatmap."""
         cm = confusion_matrix(y_true, y_pred)
-        cm_norm = cm.astype("float") / cm.sum(axis=1)[:, np.newaxis]
+        row_sums = cm.sum(axis=1, keepdims=True)
+        row_sums[row_sums == 0] = 1
+        cm_norm = cm.astype("float") / row_sums
 
         fig, ax = plt.subplots(figsize=(14, 12))
-        sns.heatmap(
-            cm_norm,
-            annot=True,
-            fmt=".2f",
-            cmap="Blues",
-            xticklabels=self.genre_names,
-            yticklabels=self.genre_names,
-            ax=ax,
-        )
+        sns.heatmap(cm_norm, annot=True, fmt=".2f", cmap="Blues", ax=ax,
+                    xticklabels=self.genre_names, yticklabels=self.genre_names,
+                    cbar_kws={'label': 'Proportion'}, vmin=0, vmax=1)
         ax.set_xlabel("Predicted", fontsize=12)
         ax.set_ylabel("True", fontsize=12)
-        ax.set_title(
-            "Confusion Matrix — Single-Label Genre Classification (normalized)",
-            fontsize=14,
-        )
+        ax.set_title("Confusion Matrix (Normalized)", fontsize=14)
         plt.xticks(rotation=45, ha="right", fontsize=8)
         plt.yticks(rotation=0, fontsize=8)
         plt.tight_layout()
 
         if save_path:
-            save_path = Path(save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            logger.debug("Confusion matrix saved: %s", save_path.name)
-
+            logger.info("Confusion matrix saved: %s", Path(save_path).name)
         plt.show()
 
-    # ------------------------------------------------------------------
-    # Plot: Per-Class F1
-    # ------------------------------------------------------------------
-
     def plot_per_class_f1(
-        self,
-        report: Dict[str, Any],
-        save_path: Optional[Path] = None,
+        self, report: Dict[str, Any], save_path: Optional[Path] = None
     ) -> None:
-        """
-        Plot horizontal bar chart of F1 scores per genre.
-
-        Bar color intensity reflects score; annotations include sample count.
-
-        Args:
-            report: Classification report dict (output_dict=True).
-            save_path: If provided, saves the figure to this path.
-        """
-        f1_scores = [
-            report[genre]["f1-score"] for genre in self.genre_names
-        ]
-        supports = [
-            report[genre]["support"] for genre in self.genre_names
-        ]
+        """Plot horizontal bar chart of F1 scores per genre."""
+        f1_scores = [report[genre]["f1-score"] if genre in report else 0.0 for genre in self.genre_names]
+        supports = [int(report[genre]["support"]) if genre in report else 0 for genre in self.genre_names]
 
         fig, ax = plt.subplots(figsize=(12, 8))
         colors = plt.cm.RdYlGn_r(np.linspace(0.2, 0.8, len(self.genre_names)))
         bars = ax.barh(self.genre_names, f1_scores, color=colors)
         ax.set_xlabel("F1-score", fontsize=12)
-        ax.set_title("F1-score by Genre (bar label = sample count)", fontsize=14)
+        ax.set_title("F1-score by Genre", fontsize=14)
         ax.set_xlim(0, 1)
 
         for bar, score, support in zip(bars, f1_scores, supports):
-            ax.text(
-                bar.get_width() + 0.01,
-                bar.get_y() + bar.get_height() / 2,
-                f"{score:.3f} (n={support})",
-                va="center",
-                fontsize=9,
-            )
+            ax.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height() / 2,
+                    f"{score:.3f} (n={support})", va="center", fontsize=9)
 
         plt.tight_layout()
         if save_path:
-            save_path = Path(save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            logger.debug("Per-class F1 plot saved: %s", save_path.name)
-
+            logger.info("Per-class F1 plot saved: %s", Path(save_path).name)
         plt.show()
 
-    # ------------------------------------------------------------------
-    # Plot: Confidence Distribution
-    # ------------------------------------------------------------------
-
     def plot_confidence_distribution(
-        self,
-        confidences: np.ndarray,
-        is_correct: np.ndarray,
-        save_path: Optional[Path] = None,
+        self, confidences: np.ndarray, is_correct: np.ndarray, save_path: Optional[Path] = None
     ) -> None:
-        """
-        Plot overlapping histograms of max probability for correct
-        and incorrect predictions.
-
-        Args:
-            confidences: 1D array of max predicted probabilities per sample.
-            is_correct: 1D boolean array (True if prediction was correct).
-            save_path: If provided, saves the figure to this path.
-        """
+        """Plot overlapping histograms of confidence."""
         correct_conf = confidences[is_correct]
         wrong_conf = confidences[~is_correct]
 
         fig, ax = plt.subplots(figsize=(10, 6))
-
-        ax.hist(
-            correct_conf, bins=20, alpha=0.7,
-            label=f"Correct (n={len(correct_conf)})", color="green",
-        )
-        ax.hist(
-            wrong_conf, bins=20, alpha=0.7,
-            label=f"Wrong (n={len(wrong_conf)})", color="red",
-        )
+        ax.hist(correct_conf, bins=20, alpha=0.7, label=f"Correct (n={len(correct_conf)})", color="green")
+        ax.hist(wrong_conf, bins=20, alpha=0.7, label=f"Wrong (n={len(wrong_conf)})", color="red")
         ax.axvline(x=0.5, color="gray", linestyle="--", label="Threshold (0.5)")
         ax.set_xlabel("Max Probability", fontsize=12)
         ax.set_ylabel("Count", fontsize=12)
         ax.set_title("Model Confidence Distribution", fontsize=14)
         ax.legend()
-
         plt.tight_layout()
         if save_path:
-            save_path = Path(save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            logger.debug("Confidence distribution saved: %s", save_path.name)
-
+            logger.info("Confidence distribution saved: %s", Path(save_path).name)
         plt.show()
 
-    # ------------------------------------------------------------------
-    # Plot: Top-k Accuracy
-    # ------------------------------------------------------------------
-
     def plot_topk_accuracy(
-        self,
-        y_true: np.ndarray,
-        y_pred_proba: np.ndarray,
-        max_k: int = 10,
-        save_path: Optional[Path] = None,
+        self, y_true: np.ndarray, y_pred_proba: np.ndarray,
+        max_k: int = 10, save_path: Optional[Path] = None
     ) -> None:
-        """
-        Plot Top-k accuracy as a function of k.
-
-        Args:
-            y_true: Ground truth labels.
-            y_pred_proba: Predicted probability matrix.
-            max_k: Maximum k value to plot (default: 10).
-            save_path: If provided, saves the figure to this path.
-        """
+        """Plot Top-k accuracy curve."""
         k_values = list(range(1, max_k + 1))
-        accuracies = [
-            self.model.top_k_accuracy(y_true, y_pred_proba, k=k)
-            for k in k_values
-        ]
+        accuracies = [self.model.top_k_accuracy(y_true, y_pred_proba, k=k) for k in k_values]
 
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.plot(k_values, accuracies, "bo-", linewidth=2, markersize=8)
         ax.fill_between(k_values, accuracies, alpha=0.2)
         ax.set_xlabel("k", fontsize=12)
         ax.set_ylabel("Accuracy", fontsize=12)
-        ax.set_title("Top-k Accuracy — Single-Label Classification", fontsize=14)
+        ax.set_title("Top-k Accuracy", fontsize=14)
         ax.set_xticks(k_values)
         ax.grid(True, alpha=0.3)
-        ax.set_ylim([0, 1])
+        ax.set_ylim(0, 1)
 
         for k, acc in zip(k_values, accuracies):
-            ax.annotate(
-                f"{acc:.3f}", (k, acc),
-                textcoords="offset points",
-                xytext=(0, 10), ha="center", fontsize=9,
-            )
-
+            ax.annotate(f"{acc:.3f}", (k, acc), textcoords="offset points",
+                        xytext=(0, 10), ha="center", fontsize=9)
         plt.tight_layout()
         if save_path:
-            save_path = Path(save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            logger.debug("Top-k accuracy plot saved: %s", save_path.name)
-
+            logger.info("Top-k accuracy plot saved: %s", Path(save_path).name)
         plt.show()
 
-    # ------------------------------------------------------------------
-    # Plot: Rare vs. Common Genre Analysis
-    # ------------------------------------------------------------------
-
     def plot_rare_genres_analysis(
-        self,
-        y_true: np.ndarray,
-        y_pred: np.ndarray,
-        min_support: int = 50,
-        save_path: Optional[Path] = None,
+        self, y_true: np.ndarray, y_pred: np.ndarray,
+        min_support: int = 50, save_path: Optional[Path] = None
     ) -> Dict[str, float]:
-        """
-        Compare model quality on rare vs. common genres.
-
-        Genres with ≤ min_support test samples are considered rare.
-
-        Args:
-            y_true: Ground truth labels.
-            y_pred: Predicted labels.
-            min_support: Maximum samples for a genre to be considered rare.
-            save_path: If provided, saves the figure to this path.
-
-        Returns:
-            Dictionary with keys 'rare_f1', 'common_f1', 'gap'.
-        """
+        """Compare model quality on rare vs common genres."""
         genre_counts = Counter(y_true)
-
-        rare_genres = [
-            genre for i, genre in enumerate(self.genre_names)
-            if genre_counts.get(i, 0) <= min_support
-        ]
-        common_genres = [
-            genre for i, genre in enumerate(self.genre_names)
-            if genre_counts.get(i, 0) > min_support
-        ]
+        rare_genres = [genre for i, genre in enumerate(self.genre_names) if genre_counts.get(i, 0) <= min_support]
+        common_genres = [genre for i, genre in enumerate(self.genre_names) if genre_counts.get(i, 0) > min_support]
 
         def get_mask(genres_list):
             mask = np.zeros(len(y_true), dtype=bool)
@@ -436,73 +371,33 @@ class ModelAnalyzer:
         mask_rare = get_mask(rare_genres)
         mask_common = get_mask(common_genres)
 
-        f1_rare = f1_score(
-            y_true[mask_rare], y_pred[mask_rare],
-            average="weighted", zero_division=0,
-        )
-        f1_common = f1_score(
-            y_true[mask_common], y_pred[mask_common],
-            average="weighted", zero_division=0,
-        )
+        f1_rare = f1_score(y_true[mask_rare], y_pred[mask_rare], average="weighted", zero_division=0)
+        f1_common = f1_score(y_true[mask_common], y_pred[mask_common], average="weighted", zero_division=0)
         gap = f1_common - f1_rare
 
-        logger.info(
-            "Rare genre analysis — rare: %d genres (F1=%.4f), "
-            "common: %d genres (F1=%.4f), gap: %.4f",
-            len(rare_genres), f1_rare,
-            len(common_genres), f1_common,
-            gap,
-        )
+        logger.info("Rare genre analysis — rare: %d (F1=%.4f), common: %d (F1=%.4f), gap: %.4f",
+                    len(rare_genres), f1_rare, len(common_genres), f1_common, gap)
 
-        # Plot
         fig, ax = plt.subplots(figsize=(10, 6))
-        categories = ["Rare genres", "Common genres"]
-        scores = [f1_rare, f1_common]
-        colors = ["#e74c3c", "#2ecc71"]
-
-        bars = ax.bar(categories, scores, color=colors)
+        bars = ax.bar(["Rare genres", "Common genres"], [f1_rare, f1_common], color=["#e74c3c", "#2ecc71"])
         ax.set_ylim(0, 1)
         ax.set_ylabel("F1-score (weighted)", fontsize=12)
-        ax.set_title(
-            f"Quality on Rare (≤{min_support}) vs Common Genres",
-            fontsize=14,
-        )
-
-        for bar, score in zip(bars, scores):
-            ax.text(
-                bar.get_x() + bar.get_width() / 2,
-                bar.get_height() + 0.02,
-                f"{score:.4f}",
-                ha="center",
-                fontsize=11,
-            )
-
+        ax.set_title(f"Quality on Rare (≤{min_support}) vs Common Genres", fontsize=14)
+        for bar, score in zip(bars, [f1_rare, f1_common]):
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02,
+                    f"{score:.4f}", ha="center", fontsize=11)
         plt.tight_layout()
         if save_path:
-            save_path = Path(save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
+            Path(save_path).parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            logger.debug("Rare genre analysis saved: %s", save_path.name)
-
+            logger.info("Rare genre analysis saved: %s", Path(save_path).name)
         plt.show()
 
         return {"rare_f1": f1_rare, "common_f1": f1_common, "gap": gap}
 
-    # ------------------------------------------------------------------
-    # Report printing
-    # ------------------------------------------------------------------
-
     def print_analysis_report(self, results: Dict[str, Any]) -> None:
-        """
-        Print a formatted analysis report to stdout.
-
-        This is a manual debugging/exploration utility — not logged.
-
-        Args:
-            results: Results dictionary from analyze_predictions().
-        """
+        """Print a formatted analysis report."""
         metrics = results["metrics"]
-
         print("=" * 70)
         print("COMPREHENSIVE MODEL ANALYSIS — MONO CLASSIFICATION")
         print("=" * 70)
@@ -519,14 +414,10 @@ class ModelAnalyzer:
         print(f"ROC-AUC (ovo):       {metrics.get('roc_auc_ovo', 'N/A')}")
         print(f"ROC-AUC (ovr):       {metrics.get('roc_auc_ovr', 'N/A')}")
         print("-" * 70)
-        print(
-            f"Misclassified:       {results['misclassified_count']} "
-            f"({results['misclassified_rate']:.2%})"
-        )
+        print(f"Misclassified:       {results['misclassified_count']} ({results['misclassified_rate']:.2%})")
         print(f"Confidence (correct): {results['confidence_correct']:.3f}")
         print(f"Confidence (wrong):   {results['confidence_wrong']:.3f}")
-        gap = results["confidence_correct"] - results["confidence_wrong"]
-        print(f"Confidence gap:       {gap:.3f}")
+        print(f"Confidence gap:       {results['confidence_gap']:.3f}")
         print("-" * 70)
         print("\nTop-10 most confused genre pairs (true → predicted):")
         for true_genre, pred_genre, count in results["confusion_pairs"][:10]:

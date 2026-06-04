@@ -1,5 +1,4 @@
 """
-src/data/preprocessor.py
 Data preprocessing — label encoding, feature normalization, rare genre filtering.
 
 Provides a scikit-learn-compatible preprocessing pipeline that:
@@ -31,7 +30,7 @@ Typical usage:
 
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -63,7 +62,7 @@ class DataPreprocessor:
         scaler: Fitted sklearn StandardScaler instance.
     """
 
-    def __init__(self, min_samples_per_genre: int = 100):
+    def __init__(self, min_samples_per_genre: int = 100) -> None:
         """
         Initialize the preprocessor.
 
@@ -261,13 +260,16 @@ class DataPreprocessor:
         weights = compute_class_weight('balanced', classes=classes, y=y_train)
         weight_dict = dict(zip(classes, weights))
 
+        min_weight = min(weight_dict.values()) if weight_dict else 0.0
+        max_weight = max(weight_dict.values()) if weight_dict else 0.0
+        ratio = max_weight / min_weight if min_weight > 0 else float('inf')
+
         logger.info(
             "Class weights computed for %d classes (min=%.3f, max=%.3f, ratio=%.1f:1)",
             len(weight_dict),
-            min(weight_dict.values()),
-            max(weight_dict.values()),
-            max(weight_dict.values()) / min(weight_dict.values())
-            if min(weight_dict.values()) > 0 else float('inf')
+            min_weight,
+            max_weight,
+            ratio
         )
         logger.debug("Class weight details: %s", weight_dict)
 

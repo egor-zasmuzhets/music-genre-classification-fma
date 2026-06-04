@@ -1,5 +1,4 @@
 """
-src/data/pipeline.py
 Complete data preparation pipeline for FMA genre classification.
 
 Orchestrates the full sequence from raw metadata to normalized, encoded,
@@ -83,7 +82,7 @@ class DataPipeline:
         use_features: bool = True,
         check_audio_availability: bool = True,
         filter_corrupt_audio: bool = False,
-    ):
+    ) -> None:
         """
         Initialize the data pipeline.
 
@@ -119,9 +118,7 @@ class DataPipeline:
             )
             self.check_audio_availability = True
 
-        self.dataset_id = (
-            f"{subset}_{min_samples_per_genre}"
-        )
+        self.dataset_id = f"{subset}_{min_samples_per_genre}"
 
         self._setup_paths()
 
@@ -244,11 +241,11 @@ class DataPipeline:
             "Official FMA split — train: %d (%.1f%%), val: %d (%.1f%%), "
             "test: %d (%.1f%%)",
             len(train_idx),
-            100 * len(train_idx) / n_total,
+            100 * len(train_idx) / n_total if n_total else 0,
             len(val_idx),
-            100 * len(val_idx) / n_total,
+            100 * len(val_idx) / n_total if n_total else 0,
             len(test_idx),
-            100 * len(test_idx) / n_total,
+            100 * len(test_idx) / n_total if n_total else 0,
         )
 
         if self.use_features:
@@ -261,7 +258,7 @@ class DataPipeline:
                     "%d tracks (%.1f%%) have no features in features.csv "
                     "and will be excluded",
                     n_missing_features,
-                    100 * n_missing_features / len(tracks_filtered),
+                    100 * n_missing_features / len(tracks_filtered) if len(tracks_filtered) else 0,
                 )
 
             X_all = features_all.loc[common_idx]
@@ -386,7 +383,7 @@ class DataPipeline:
                     "missing_count": len(missing),
                     "missing_ids": missing,
                     "available_rate": (
-                        len(available) / len(idx_list) if idx_list else 0.0
+                        len(available) / len(idx_list) if len(idx_list) else 0.0
                     ),
                 }
 
@@ -640,14 +637,16 @@ class DataPipeline:
         logger.info("Total tracks:  %d", meta["num_samples"])
         logger.info("Features:      %d", meta["num_features"])
         logger.info("Genres:        %d", meta["num_classes"])
+
+        n_samples = meta["num_samples"]
         logger.info(
             "Split — train: %d (%.1f%%), val: %d (%.1f%%), test: %d (%.1f%%)",
             meta["train_size"],
-            100 * meta["train_size"] / meta["num_samples"] if meta["num_samples"] else 0,
+            100 * meta["train_size"] / n_samples if n_samples else 0,
             meta["val_size"],
-            100 * meta["val_size"] / meta["num_samples"] if meta["num_samples"] else 0,
+            100 * meta["val_size"] / n_samples if n_samples else 0,
             meta["test_size"],
-            100 * meta["test_size"] / meta["num_samples"] if meta["num_samples"] else 0,
+            100 * meta["test_size"] / n_samples if n_samples else 0,
         )
 
         if meta.get("filtered_corrupt_audio"):
@@ -712,6 +711,7 @@ class DataPipeline:
 
         Raises:
             RuntimeError: If pipeline hasn't been run or audio wasn't checked.
+            ValueError: If split name is invalid.
         """
         if self._data is None:
             raise RuntimeError("Pipeline has not been run. Call run() first.")

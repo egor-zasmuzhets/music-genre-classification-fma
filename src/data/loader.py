@@ -1,5 +1,4 @@
 """
-src/data/loader.py
 FMA metadata loader — loads raw CSV files from the Free Music Archive dataset.
 
 Provides lazy-loading access to tracks, features, and genres metadata
@@ -48,7 +47,7 @@ class FMALoader:
         metadata_dir: Path to the directory containing FMA metadata CSV files.
     """
 
-    def __init__(self, metadata_dir: Optional[Path] = None):
+    def __init__(self, metadata_dir: Optional[Path] = None) -> None:
         """
         Initialize the FMA loader.
 
@@ -182,34 +181,36 @@ class FMALoader:
 
         Raises:
             KeyError: If the subset column is not found in the tracks data.
+            ValueError: If the subset name is not one of 'small', 'medium', 'large'.
         """
         tracks = self.tracks
 
         subset_column = ('set', 'subset')
 
-        if subset_column in tracks.columns:
-            if subset == 'small':
-                filtered = tracks[tracks[subset_column] == 'small'].copy()
-            elif subset == 'medium':
-                filtered = tracks[tracks[subset_column] != 'large'].copy()
-            elif subset == 'large':
-                filtered = tracks.copy()
-            else:
-                raise ValueError(
-                    f"Unknown subset: '{subset}'. "
-                    f"Expected: 'small', 'medium', or 'large'."
-                )
-            logger.info(
-                "Filtered %s subset: %d tracks (from %d total)",
-                subset,
-                len(filtered),
-                len(tracks)
-            )
-        else:
+        if subset_column not in tracks.columns:
             raise KeyError(
                 f"Subset column {subset_column} not found in tracks. "
                 f"Available columns: {list(tracks.columns)}"
             )
+
+        if subset == 'small':
+            filtered = tracks[tracks[subset_column] == 'small'].copy()
+        elif subset == 'medium':
+            filtered = tracks[tracks[subset_column] != 'large'].copy()
+        elif subset == 'large':
+            filtered = tracks.copy()
+        else:
+            raise ValueError(
+                f"Unknown subset: '{subset}'. "
+                f"Expected: 'small', 'medium', or 'large'."
+            )
+
+        logger.info(
+            "Filtered %s subset: %d tracks (from %d total)",
+            subset,
+            len(filtered),
+            len(tracks)
+        )
 
         return filtered
 

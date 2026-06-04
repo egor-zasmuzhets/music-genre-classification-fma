@@ -1,29 +1,28 @@
 """
-src/data/mfcc_extractor.py
 MFCC feature extraction from audio with multi-level disk caching.
 
 Extracts MFCC features from raw audio waveforms, optionally including
-delta and delta-delta coefficients. Supports four-tier disk caching
-(full feature dict, base MFCC, MFCC with deltas, CNN-ready) to
-accelerate repeated access during training. Tracks known-bad audio files
-to avoid redundant extraction attempts.
+delta and delta-delta coefficients. Supports disk caching of base MFCC
+slices with deterministic crop positions for reproducibility.
+Tracks known-bad audio files to avoid redundant extraction attempts.
 
 Typical usage:
     from src.data.mfcc_extractor import MFCCExtractor, MFCCConfig
 
-    config = MFCCConfig(include_delta=True, include_delta2=True)
+    config = MFCCConfig(n_mfcc=40, include_delta=True, include_delta2=True)
     extractor = MFCCExtractor(config=config)
 
-    mfcc, status = extractor.prepare_for_cnn_with_status(2, target_frames=128)
+    # Получить 3 среза для train
+    crops = extractor.prepare_crops_for_track(2, target_frames=430, n_crops=3, mode="train")
 
-    results, statuses = extractor.extract_batch_with_status(
-        [2, 3, 5], target_frames=128
-    )
+    # Получить 1 центральный срез для eval
+    crop = extractor.prepare_crops_for_track(2, target_frames=430, n_crops=1, mode="eval")
 """
 
 import hashlib
 import logging
 import pickle
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -54,6 +53,8 @@ class MFCCConfig:
         win_length: Window length for STFT.
         sr: Target sample rate.
         duration: Target audio duration in seconds.
+        use_spectral_features: Whether to add spectral features.
+        use_chroma: Whether to add chroma features.
     """
 
     def __init__(
@@ -66,39 +67,38 @@ class MFCCConfig:
         win_length: Optional[int] = None,
         sr: Optional[int] = None,
         duration: Optional[float] = None,
-    ):
+        use_spectral_features: bool = False,
+        use_chroma: bool = False,
+    ) -> None:
         """
         Initialize MFCC configuration.
 
         Args:
             include_delta: Include first-order temporal deltas.
             include_delta2: Include second-order temporal deltas.
-            n_mfcc: Number of MFCC coefficients. Defaults to audio_params.n_mfcc.
+            n_mfcc: Number of MFCC coefficients. Defaults to 40.
             n_fft: FFT window size. Defaults to audio_params.n_fft.
             hop_length: Hop length in samples. Defaults to audio_params.hop_length.
             win_length: Window length in samples. Defaults to audio_params.win_length.
             sr: Sample rate. Defaults to audio_params.sample_rate.
             duration: Audio duration in seconds. Defaults to audio_params.duration.
+            use_spectral_features: Add spectral features (centroid, bandwidth,
+                                   rolloff, ZCR, RMS).
+            use_chroma: Add chroma features (pitch class profile).
         """
         self.include_delta = include_delta
         self.include_delta2 = include_delta2
-        self.n_mfcc = n_mfcc if n_mfcc is not None else audio_params.n_mfcc
+        self.n_mfcc = n_mfcc if n_mfcc is not None else 40
         self.n_fft = n_fft if n_fft is not None else audio_params.n_fft
         self.hop_length = hop_length if hop_length is not None else audio_params.hop_length
         self.win_length = win_length if win_length is not None else audio_params.win_length
         self.sr = sr if sr is not None else audio_params.sample_rate
         self.duration = duration if duration is not None else audio_params.duration
+        self.use_spectral_features = use_spectral_features
+        self.use_chroma = use_chroma
 
     def get_cache_key(self) -> str:
-        """
-        Generate a unique cache key based on configuration parameters.
-
-        Uses MD5 hash of sorted parameter key-value pairs to produce
-        a short, deterministic string for cache directory naming.
-
-        Returns:
-            16-character hex digest string.
-        """
+        """Generate a unique cache key based on configuration parameters."""
         data = {
             "n_mfcc": self.n_mfcc,
             "include_delta": self.include_delta,
@@ -106,17 +106,14 @@ class MFCCConfig:
             "hop_length": self.hop_length,
             "win_length": self.win_length,
             "n_fft": self.n_fft,
+            "use_spectral_features": self.use_spectral_features,
+            "use_chroma": self.use_chroma,
         }
         key_str = str(sorted(data.items()))
         return hashlib.md5(key_str.encode()).hexdigest()[:16]
 
     def to_dict(self) -> Dict[str, Any]:
-        """
-        Export librosa-compatible parameter dictionary.
-
-        Returns:
-            Dictionary with keys n_mfcc, n_fft, hop_length, win_length.
-        """
+        """Export librosa-compatible parameter dictionary."""
         return {
             "n_mfcc": self.n_mfcc,
             "n_fft": self.n_fft,
@@ -124,21 +121,29 @@ class MFCCConfig:
             "win_length": self.win_length,
         }
 
+    def get_total_channels(self) -> int:
+        """Calculate total number of feature channels."""
+        n_channels = 1
+        if self.include_delta:
+            n_channels += 1
+        if self.include_delta2:
+            n_channels += 1
+        if self.use_spectral_features:
+            n_channels += 1
+        if self.use_chroma:
+            n_channels += 1
+        return n_channels
+
 
 class MFCCExtractor:
     """
-    Extracts MFCC features from audio tracks with multi-tier caching.
+    Extracts MFCC features from audio tracks with slice-based caching.
 
-    Uses librosa for feature extraction and supports four levels of
-    disk caching to trade off storage for speed:
-    - 'full': complete feature dictionary as pickle
-    - 'mfcc_base': base MFCC matrix as .npy
-    - 'mfcc_with_deltas': vertically stacked MFCC + deltas as .npy
-    - 'cnn_ready': time-normalized (padded/cropped) matrix as .npy
+    Uses librosa for feature extraction. Caches only base MFCC slices
+    (without deltas) to save disk space. Delta and delta-delta features
+    are computed on-the-fly during loading.
 
-    Each configuration gets its own cache subdirectory identified
-    by a hash of key parameters. Tracks that fail to load are remembered
-    to avoid repeated extraction attempts during multi-epoch training.
+    Crop positions are deterministic based on track_id for reproducibility.
 
     Attributes:
         config: MFCCConfig with extraction parameters.
@@ -153,7 +158,7 @@ class MFCCExtractor:
         audio_loader: Optional[AudioLoader] = None,
         use_disk_cache: bool = True,
         disk_cache_dir: Optional[Path] = None,
-    ):
+    ) -> None:
         """
         Initialize the MFCC extractor.
 
@@ -172,25 +177,24 @@ class MFCCExtractor:
         if self.use_disk_cache:
             self.cache_subdir = self.disk_cache_dir / self.config.get_cache_key()
             self.cache_subdir.mkdir(parents=True, exist_ok=True)
-            logger.debug("MFCC cache directory: %s", self.cache_subdir)
         else:
             self.cache_subdir = None
 
         self._failed_tracks: set = set()
 
-        n_channels = 1
-        if self.config.include_delta:
-            n_channels += 1
-        if self.config.include_delta2:
-            n_channels += 1
+        n_channels = self.config.get_total_channels()
+        total_features = n_channels * self.config.n_mfcc
 
         logger.info(
-            "MFCCExtractor initialized — n_mfcc=%d, deltas: %s/%s "
-            "→ %d channel(s), disk_cache=%s",
+            "MFCCExtractor initialized — n_mfcc=%d, deltas: %s/%s, "
+            "spectral=%s, chroma=%s → %d channel(s), %d total features, disk_cache=%s",
             self.config.n_mfcc,
             "on" if self.config.include_delta else "off",
             "on" if self.config.include_delta2 else "off",
+            "on" if self.config.use_spectral_features else "off",
+            "on" if self.config.use_chroma else "off",
             n_channels,
+            total_features,
             "on" if use_disk_cache else "off",
         )
 
@@ -205,23 +209,256 @@ class MFCCExtractor:
         self._failed_tracks.clear()
         logger.debug("Cleared %d failed track records", count)
 
-    def _get_cache_paths(self, track_id: int) -> Dict[str, Path]:
+    def _get_track_dir(self, track_id: int) -> Path:
+        """Get the cache directory for a specific track."""
+        return self.cache_subdir / f"{track_id:06d}"
+
+    def _get_slice_cache_path(
+        self,
+        track_id: int,
+        target_frames: int,
+        crop_index: int,
+        mode: str = "train",
+    ) -> Path:
         """
-        Build paths for all cache tiers of a given track.
+        Build cache path for a specific MFCC slice.
 
         Args:
             track_id: Numeric track identifier.
+            target_frames: Number of time frames in the slice.
+            crop_index: Index of the crop (0 for center, 0..N for random).
+            mode: 'train' or 'eval' (affects filename).
 
         Returns:
-            Dictionary mapping cache type names to file paths:
-            - 'full': pickle with complete feature dict
-            - 'mfcc_base': .npy with base MFCC matrix
-            - 'mfcc_with_deltas': .npy with vertically stacked MFCC+deltas
-            - 'cnn_ready': .npy with time-normalized matrix
+            Path to the .npy cache file.
         """
+        track_dir = self._get_track_dir(track_id)
+        if mode == "eval" or crop_index < 0:
+            suffix = f"base_{target_frames}_center.npy"
+        else:
+            suffix = f"base_{target_frames}_crop{crop_index}.npy"
+        return track_dir / suffix
+
+    def _compute_crop_start(
+        self,
+        track_id: int,
+        n_frames: int,
+        target_frames: int,
+        crop_index: int,
+        n_crops: int,
+        mode: str = "train",
+    ) -> int:
+        """
+        Compute deterministic crop start position for a track.
+
+        Uses track_id as seed for reproducibility.
+        Same track_id always produces same crop positions.
+
+        Args:
+            track_id: Numeric track identifier.
+            n_frames: Total number of MFCC frames in the track.
+            target_frames: Desired number of frames per slice.
+            crop_index: Which crop (0, 1, 2, ...).
+            n_crops: Total number of crops requested.
+            mode: 'train' or 'eval'. Eval always returns center.
+
+        Returns:
+            Start frame index for the crop.
+        """
+        if n_frames <= target_frames:
+            return 0
+
+        max_start = n_frames - target_frames
+
+        if mode == "eval" or n_crops == 1:
+            return max_start // 2
+
+        rng = np.random.RandomState(track_id * 31 + crop_index * 7)
+
+        if n_crops <= 1:
+            return max_start // 2
+
+        base_step = max_start / n_crops
+        offset_range = int(base_step * 0.25)
+        offset = rng.randint(-offset_range, offset_range + 1) if offset_range > 0 else 0
+        start = int(crop_index * base_step + offset)
+
+        return max(0, min(max_start, start))
+
+    def _extract_base_mfcc(self, track_id: int) -> Optional[np.ndarray]:
+        """
+        Extract base MFCC matrix for a track (no deltas, no padding).
+
+        Returns:
+            Array of shape (n_mfcc, n_frames) or None on failure.
+        """
+        if track_id in self._failed_tracks:
+            return None
+
+        audio, audio_status = self.audio_loader.load_audio_with_status(
+            track_id, self.config.sr, self.config.duration
+        )
+
+        if not audio_status["success"]:
+            self._failed_tracks.add(track_id)
+            logger.warning(
+                "Track %d: audio load failed — %s",
+                track_id,
+                audio_status.get("error_message", "unknown"),
+            )
+            return None
+
+        try:
+            mfcc = librosa.feature.mfcc(
+                y=audio,
+                sr=self.config.sr,
+                **self.config.to_dict(),
+            )
+            return mfcc.astype(np.float32)
+        except Exception as e:
+            self._failed_tracks.add(track_id)
+            logger.warning("Track %d: MFCC extraction failed — %s", track_id, e)
+            return None
+
+    def prepare_crops_for_track(
+        self,
+        track_id: int,
+        target_frames: int = 430,
+        n_crops: int = 1,
+        mode: str = "eval",
+    ) -> List[Optional[np.ndarray]]:
+        """
+        Prepare MFCC slices for a track with deterministic crop positions.
+
+        Caches only base MFCC slices (n_mfcc, target_frames).
+        Deltas and multi-channel stacking are done on-the-fly by the caller.
+
+        Args:
+            track_id: Numeric track identifier.
+            target_frames: Number of time frames per slice.
+            n_crops: Number of slices to extract.
+            mode: 'train' for training (random crop positions),
+                  'eval' for evaluation (center crop only).
+
+        Returns:
+            List of numpy arrays, each shape (n_mfcc, target_frames).
+            Failed crops are None.
+        """
+        if track_id in self._failed_tracks:
+            return [None] * n_crops
+
+        results = []
+
+        for crop_idx in range(n_crops):
+            cache_path = self._get_slice_cache_path(
+                track_id, target_frames, crop_idx if mode == "train" else -1, mode
+            )
+
+            if self.use_disk_cache and cache_path.exists():
+                try:
+                    mfcc_slice = np.load(cache_path)
+                    results.append(mfcc_slice)
+                    continue
+                except Exception:
+                    logger.warning(
+                        "Corrupt cache for track %d crop %d, re-extracting",
+                        track_id, crop_idx,
+                    )
+
+            mfcc_full = self._extract_base_mfcc(track_id)
+            if mfcc_full is None:
+                results.append(None)
+                continue
+
+            n_frames = mfcc_full.shape[1]
+            start = self._compute_crop_start(
+                track_id, n_frames, target_frames, crop_idx, n_crops, mode
+            )
+
+            if n_frames < target_frames:
+                pad_width = ((0, 0), (0, target_frames - n_frames))
+                mfcc_slice = np.pad(mfcc_full, pad_width, mode="constant")
+            else:
+                mfcc_slice = mfcc_full[:, start:start + target_frames]
+
+            mfcc_slice = mfcc_slice.astype(np.float32)
+
+            if self.use_disk_cache:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    np.save(cache_path, mfcc_slice)
+                except Exception:
+                    logger.warning(
+                        "Failed to write cache for track %d crop %d", track_id, crop_idx
+                    )
+
+            results.append(mfcc_slice)
+
+        return results
+
+    def get_base_mfcc_slice(
+        self,
+        track_id: int,
+        target_frames: int = 430,
+        crop_index: int = 0,
+        mode: str = "eval",
+    ) -> Optional[np.ndarray]:
+        """
+        Get a single base MFCC slice (convenience wrapper).
+
+        Args:
+            track_id: Numeric track identifier.
+            target_frames: Number of time frames.
+            crop_index: Which crop to retrieve.
+            mode: 'train' or 'eval'.
+
+        Returns:
+            Array of shape (n_mfcc, target_frames) or None.
+        """
+        crops = self.prepare_crops_for_track(
+            track_id, target_frames, n_crops=max(1, crop_index + 1), mode=mode
+        )
+        if crops and crop_index < len(crops):
+            return crops[crop_index]
+        return None
+
+    def extract_from_audio(
+        self,
+        audio: np.ndarray,
+        sr: int,
+    ) -> Dict[str, np.ndarray]:
+        """Extract MFCC features from a raw audio waveform."""
+        mfcc = librosa.feature.mfcc(y=audio, sr=sr, **self.config.to_dict())
+        result = {"mfcc": mfcc}
+
+        if self.config.include_delta:
+            result["mfcc_delta"] = librosa.feature.delta(mfcc)
+        if self.config.include_delta2:
+            result["mfcc_delta2"] = librosa.feature.delta(mfcc, order=2)
+        if self.config.use_spectral_features:
+            spectral_features = [
+                librosa.feature.spectral_centroid(y=audio, sr=sr, hop_length=self.config.hop_length),
+                librosa.feature.spectral_bandwidth(y=audio, sr=sr, hop_length=self.config.hop_length),
+                librosa.feature.spectral_rolloff(y=audio, sr=sr, hop_length=self.config.hop_length),
+                librosa.feature.zero_crossing_rate(audio, hop_length=self.config.hop_length),
+                librosa.feature.rms(y=audio, hop_length=self.config.hop_length),
+            ]
+            result["spectral_features"] = np.vstack(spectral_features)
+        if self.config.use_chroma:
+            result["chroma"] = librosa.feature.chroma_stft(
+                y=audio, sr=sr, hop_length=self.config.hop_length, n_chroma=12
+            )
+
+        return result
+
+    # ========================================================================
+    # Legacy methods (keep for backward compatibility)
+    # ========================================================================
+
+    def _get_cache_paths(self, track_id: int) -> Dict[str, Path]:
+        """Build paths for all cache tiers of a given track (legacy)."""
         track_str = f"{track_id:06d}"
         base_path = self.cache_subdir / track_str
-
         return {
             "full": base_path.with_suffix(".full.pkl"),
             "mfcc_base": base_path.with_suffix(".base.npy"),
@@ -230,25 +467,13 @@ class MFCCExtractor:
         }
 
     def _load_from_cache(self, track_id: int, cache_type: str) -> Optional[Any]:
-        """
-        Load data from a specific cache tier.
-
-        Args:
-            track_id: Numeric track identifier.
-            cache_type: One of 'full', 'mfcc_base', 'mfcc_with_deltas', 'cnn_ready'.
-
-        Returns:
-            Cached data (dict or np.ndarray), or None if not found or corrupt.
-        """
+        """Load data from a specific cache tier (legacy)."""
         if not self.use_disk_cache:
             return None
-
         cache_paths = self._get_cache_paths(track_id)
         cache_path = cache_paths.get(cache_type)
-
         if cache_path is None or not cache_path.exists():
             return None
-
         try:
             if cache_type == "full":
                 with open(cache_path, "rb") as f:
@@ -256,31 +481,17 @@ class MFCCExtractor:
             else:
                 return np.load(cache_path)
         except Exception:
-            logger.debug(
-                "Corrupt cache (%s) for track %d, will re-extract",
-                cache_type,
-                track_id,
-            )
+            logger.warning("Corrupt cache (%s) for track %d, will re-extract", cache_type, track_id)
             return None
 
     def _save_to_cache(self, track_id: int, cache_type: str, data: Any) -> None:
-        """
-        Save data to a specific cache tier.
-
-        Args:
-            track_id: Numeric track identifier.
-            cache_type: Cache tier name.
-            data: Data to persist (dict for 'full', np.ndarray otherwise).
-        """
+        """Save data to a specific cache tier (legacy)."""
         if not self.use_disk_cache:
             return
-
         cache_paths = self._get_cache_paths(track_id)
         cache_path = cache_paths.get(cache_type)
-
         if cache_path is None:
             return
-
         try:
             if cache_type == "full":
                 with open(cache_path, "wb") as f:
@@ -288,74 +499,20 @@ class MFCCExtractor:
             else:
                 np.save(cache_path, data)
         except Exception:
-            logger.warning(
-                "Failed to write %s cache for track %d", cache_type, track_id
-            )
-
-    def extract_from_audio(
-        self,
-        audio: np.ndarray,
-        sr: int,
-    ) -> Dict[str, np.ndarray]:
-        """
-        Extract MFCC features from a raw audio waveform.
-
-        Args:
-            audio: 1D numpy array of float32 audio samples.
-            sr: Sample rate of the audio.
-
-        Returns:
-            Dictionary with keys:
-            - 'mfcc': (n_mfcc, n_frames) base MFCC array
-            - 'mfcc_delta': (n_mfcc, n_frames) first-order deltas (if enabled)
-            - 'mfcc_delta2': (n_mfcc, n_frames) second-order deltas (if enabled)
-        """
-        mfcc = librosa.feature.mfcc(
-            y=audio,
-            sr=sr,
-            **self.config.to_dict(),
-        )
-
-        result = {"mfcc": mfcc}
-
-        if self.config.include_delta:
-            result["mfcc_delta"] = librosa.feature.delta(mfcc)
-
-        if self.config.include_delta2:
-            result["mfcc_delta2"] = librosa.feature.delta(mfcc, order=2)
-
-        return result
+            logger.warning("Failed to write %s cache for track %d", cache_type, track_id)
 
     def extract_from_track_id_with_status(
-        self,
-        track_id: int,
-        use_cache: bool = True,
+        self, track_id: int, use_cache: bool = True,
     ) -> Tuple[Optional[Dict[str, np.ndarray]], Dict[str, Any]]:
-        """
-        Extract full MFCC feature dict for a track with status reporting.
-
-        Args:
-            track_id: Numeric track identifier.
-            use_cache: Whether to check and populate disk cache.
-
-        Returns:
-            Tuple of (features_dict_or_None, status_dict).
-            status_dict keys: success, error_type, error_message,
-            loaded_from_cache, track_id.
-        """
+        """Extract full MFCC feature dict for a track (legacy)."""
         status: Dict[str, Any] = {
-            "success": False,
-            "error_type": None,
-            "error_message": None,
-            "track_id": track_id,
-            "loaded_from_cache": False,
+            "success": False, "error_type": None, "error_message": None,
+            "track_id": track_id, "loaded_from_cache": False,
         }
-
         if track_id in self._failed_tracks:
             status["error_type"] = "cached_failure"
             status["error_message"] = "Track previously failed, skipping"
             return None, status
-
         if use_cache and self.use_disk_cache:
             cached = self._load_from_cache(track_id, "full")
             if cached is not None:
@@ -363,389 +520,199 @@ class MFCCExtractor:
                 status["loaded_from_cache"] = True
                 status["cache_type"] = "disk"
                 return cached, status
-
         audio, audio_status = self.audio_loader.load_audio_with_status(
             track_id, self.config.sr, self.config.duration
         )
-
         if not audio_status["success"]:
             self._failed_tracks.add(track_id)
             status["error_type"] = audio_status["error_type"]
-            status["error_message"] = (
-                f"Audio load failed: {audio_status['error_message']}"
-            )
-            logger.warning(
-                "Track %d: audio load failed — %s",
-                track_id,
-                status["error_message"],
-            )
+            status["error_message"] = f"Audio load failed: {audio_status['error_message']}"
+            logger.warning("Track %d: audio load failed — %s", track_id, status["error_message"])
             return None, status
-
         try:
             features = self.extract_from_audio(audio, self.config.sr)
-
             if use_cache and self.use_disk_cache:
                 self._save_to_cache(track_id, "full", features)
-
             status["success"] = True
             return features, status
-
         except Exception as e:
             self._failed_tracks.add(track_id)
             status["error_type"] = "mfcc_extraction_error"
             status["error_message"] = str(e)
-            logger.warning(
-                "Track %d: MFCC extraction failed — %s",
-                track_id,
-                e,
-            )
+            logger.warning("Track %d: MFCC extraction failed — %s", track_id, e)
             return None, status
 
-    def extract_from_track_id(
-        self,
-        track_id: int,
-    ) -> Optional[Dict[str, np.ndarray]]:
-        """
-        Extract full MFCC feature dict (compatibility wrapper).
-
-        Prefer extract_from_track_id_with_status for new code.
-
-        Args:
-            track_id: Numeric track identifier.
-
-        Returns:
-            Feature dictionary or None on failure.
-        """
+    def extract_from_track_id(self, track_id: int) -> Optional[Dict[str, np.ndarray]]:
+        """Extract full MFCC feature dict (legacy wrapper)."""
         features, _ = self.extract_from_track_id_with_status(track_id)
         return features
 
-    def get_mfcc_matrix_with_status(
-        self,
-        track_id: int,
-        flatten: bool = False,
-        use_cache: bool = True,
+    def prepare_for_cnn_with_status(
+        self, track_id: int, target_frames: int = 128, use_cache: bool = True,
     ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
-        """
-        Get base MFCC matrix with status reporting.
-
-        Args:
-            track_id: Numeric track identifier.
-            flatten: If True, flatten to 1D array.
-            use_cache: Whether to use disk cache.
-
-        Returns:
-            Tuple of (mfcc_matrix_or_None, status_dict).
-        """
+        """Prepare MFCC for CNN (legacy, kept for backward compat)."""
         if track_id in self._failed_tracks:
             status = {
-                "success": False,
-                "error_type": "cached_failure",
+                "success": False, "error_type": "cached_failure",
                 "error_message": "Track previously failed, skipping",
-                "track_id": track_id,
-                "loaded_from_cache": False,
+                "track_id": track_id, "loaded_from_cache": False,
             }
             return None, status
+        if use_cache and self.use_disk_cache:
+            cached = self._load_from_cache(track_id, "cnn_ready")
+            if cached is not None and cached.shape[-1] == target_frames:
+                status = {
+                    "success": True, "loaded_from_cache": True,
+                    "cache_type": "disk", "track_id": track_id,
+                }
+                return cached, status
+        features, status = self.extract_from_track_id_with_status(track_id, use_cache)
+        if not status["success"] or features is None:
+            self._failed_tracks.add(track_id)
+            status["success"] = False
+            status["error_type"] = "no_data"
+            status["error_message"] = "No feature data returned"
+            return None, status
+        n_mfcc = self.config.n_mfcc
+        n_frames = features["mfcc"].shape[1]
+        components = []
+        mfcc_components = [features["mfcc"]]
+        if self.config.include_delta and "mfcc_delta" in features:
+            mfcc_components.append(features["mfcc_delta"])
+        if self.config.include_delta2 and "mfcc_delta2" in features:
+            mfcc_components.append(features["mfcc_delta2"])
+        mfcc_stacked = np.vstack(mfcc_components)
+        n_delta_channels = len(mfcc_components)
+        mfcc_reshaped = mfcc_stacked.reshape(n_delta_channels, n_mfcc, n_frames)
+        for i in range(n_delta_channels):
+            components.append(mfcc_reshaped[i:i+1, :, :])
+        if self.config.use_spectral_features and "spectral_features" in features:
+            spectral = features["spectral_features"]
+            spectral_padded = np.zeros((n_mfcc, n_frames))
+            n_spectral = min(spectral.shape[0], n_mfcc)
+            spectral_padded[:n_spectral, :] = spectral[:n_spectral, :]
+            components.append(spectral_padded[np.newaxis, :, :])
+        if self.config.use_chroma and "chroma" in features:
+            chroma = features["chroma"]
+            chroma_padded = np.zeros((n_mfcc, n_frames))
+            n_chroma = min(chroma.shape[0], n_mfcc)
+            chroma_padded[:n_chroma, :] = chroma[:n_chroma, :]
+            components.append(chroma_padded[np.newaxis, :, :])
+        cnn_ready = np.vstack(components).astype(np.float32)
+        n_frames = cnn_ready.shape[2]
+        if n_frames < target_frames:
+            pad_width = ((0, 0), (0, 0), (0, target_frames - n_frames))
+            cnn_ready = np.pad(cnn_ready, pad_width, mode="constant")
+        elif n_frames > target_frames:
+            start = (n_frames - target_frames) // 2
+            cnn_ready = cnn_ready[:, :, start:start + target_frames]
+        if use_cache and self.use_disk_cache:
+            self._save_to_cache(track_id, "cnn_ready", cnn_ready)
+        return cnn_ready, status
 
+    def prepare_for_cnn(self, track_id: int, target_frames: int = 128) -> Optional[np.ndarray]:
+        """Prepare CNN-ready MFCC (legacy wrapper)."""
+        mfcc, _ = self.prepare_for_cnn_with_status(track_id, target_frames)
+        return mfcc
+
+    def get_mfcc_matrix_with_status(
+        self, track_id: int, flatten: bool = False, use_cache: bool = True,
+    ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
+        """Get base MFCC matrix (legacy)."""
+        if track_id in self._failed_tracks:
+            return None, {
+                "success": False, "error_type": "cached_failure",
+                "error_message": "Track previously failed, skipping",
+                "track_id": track_id, "loaded_from_cache": False,
+            }
         if use_cache and self.use_disk_cache:
             cached = self._load_from_cache(track_id, "mfcc_base")
             if cached is not None:
-                status = {
-                    "success": True,
-                    "loaded_from_cache": True,
-                    "cache_type": "disk",
-                    "track_id": track_id,
-                }
-                result = cached.flatten() if flatten else cached
-                return result, status
-
+                status = {"success": True, "loaded_from_cache": True, "cache_type": "disk", "track_id": track_id}
+                return cached.flatten() if flatten else cached, status
         features, status = self.extract_from_track_id_with_status(track_id, use_cache)
-
         if not status["success"]:
             return None, status
-
         mfcc = features["mfcc"]
-
         if use_cache and self.use_disk_cache:
             self._save_to_cache(track_id, "mfcc_base", mfcc)
+        return mfcc.flatten() if flatten else mfcc, status
 
-        if flatten:
-            return mfcc.flatten(), status
-        return mfcc, status
-
-    def get_mfcc_matrix(
-        self,
-        track_id: int,
-        flatten: bool = False,
-        use_cache: bool = True,
-    ) -> Optional[np.ndarray]:
-        """
-        Get base MFCC matrix (compatibility wrapper).
-
-        Prefer get_mfcc_matrix_with_status for new code.
-        """
+    def get_mfcc_matrix(self, track_id: int, flatten: bool = False, use_cache: bool = True) -> Optional[np.ndarray]:
+        """Get base MFCC matrix (legacy wrapper)."""
         mfcc, _ = self.get_mfcc_matrix_with_status(track_id, flatten, use_cache)
         return mfcc
 
     def get_mfcc_with_deltas_with_status(
-        self,
-        track_id: int,
-        flatten: bool = False,
-        use_cache: bool = True,
+        self, track_id: int, flatten: bool = False, use_cache: bool = True,
     ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
-        """
-        Get vertically stacked MFCC + deltas matrix with status.
-
-        Args:
-            track_id: Numeric track identifier.
-            flatten: If True, flatten to 1D array.
-            use_cache: Whether to use disk cache.
-
-        Returns:
-            Tuple of (combined_matrix_or_None, status_dict).
-        """
+        """Get stacked MFCC + deltas (legacy)."""
         if track_id in self._failed_tracks:
-            status = {
-                "success": False,
-                "error_type": "cached_failure",
+            return None, {
+                "success": False, "error_type": "cached_failure",
                 "error_message": "Track previously failed, skipping",
-                "track_id": track_id,
-                "loaded_from_cache": False,
+                "track_id": track_id, "loaded_from_cache": False,
             }
-            return None, status
-
         if use_cache and self.use_disk_cache:
             cached = self._load_from_cache(track_id, "mfcc_with_deltas")
             if cached is not None:
-                status = {
-                    "success": True,
-                    "loaded_from_cache": True,
-                    "cache_type": "disk",
-                    "track_id": track_id,
-                }
-                result = cached.flatten() if flatten else cached
-                return result, status
-
+                status = {"success": True, "loaded_from_cache": True, "cache_type": "disk", "track_id": track_id}
+                return cached.flatten() if flatten else cached, status
         features, status = self.extract_from_track_id_with_status(track_id, use_cache)
-
         if not status["success"]:
             return None, status
-
         matrices = [features["mfcc"]]
         if self.config.include_delta and "mfcc_delta" in features:
             matrices.append(features["mfcc_delta"])
         if self.config.include_delta2 and "mfcc_delta2" in features:
             matrices.append(features["mfcc_delta2"])
-
         combined = np.vstack(matrices)
-
         if use_cache and self.use_disk_cache:
             self._save_to_cache(track_id, "mfcc_with_deltas", combined)
+        return combined.flatten() if flatten else combined, status
 
-        if flatten:
-            return combined.flatten(), status
-        return combined, status
-
-    def get_mfcc_with_deltas(
-        self,
-        track_id: int,
-        flatten: bool = False,
-        use_cache: bool = True,
-    ) -> Optional[np.ndarray]:
-        """
-        Get stacked MFCC + deltas (compatibility wrapper).
-
-        Prefer get_mfcc_with_deltas_with_status for new code.
-        """
+    def get_mfcc_with_deltas(self, track_id: int, flatten: bool = False, use_cache: bool = True) -> Optional[np.ndarray]:
+        """Get stacked MFCC + deltas (legacy wrapper)."""
         mfcc, _ = self.get_mfcc_with_deltas_with_status(track_id, flatten, use_cache)
         return mfcc
 
-    def prepare_for_cnn_with_status(
-        self,
-        track_id: int,
-        target_frames: int = 128,
-        use_cache: bool = True,
-    ) -> Tuple[Optional[np.ndarray], Dict[str, Any]]:
-        """
-        Prepare time-normalized MFCC matrix for CNN input with status.
-
-        Pads or center-crops the time axis to exactly target_frames.
-        Result shape is (n_channels, target_frames).
-
-        Args:
-            track_id: Numeric track identifier.
-            target_frames: Exact number of time frames required.
-            use_cache: Whether to use and populate disk cache.
-
-        Returns:
-            Tuple of (cnn_ready_matrix_or_None, status_dict).
-        """
-        if track_id in self._failed_tracks:
-            status = {
-                "success": False,
-                "error_type": "cached_failure",
-                "error_message": "Track previously failed, skipping",
-                "track_id": track_id,
-                "loaded_from_cache": False,
-            }
-            return None, status
-
-        if use_cache and self.use_disk_cache:
-            cached = self._load_from_cache(track_id, "cnn_ready")
-            if cached is not None and cached.shape[-1] == target_frames:
-                status = {
-                    "success": True,
-                    "loaded_from_cache": True,
-                    "cache_type": "disk",
-                    "track_id": track_id,
-                }
-                return cached, status
-            elif cached is not None:
-                logger.debug(
-                    "Track %d: CNN cache has %d frames, need %d — re-processing",
-                    track_id,
-                    cached.shape[-1],
-                    target_frames,
-                )
-
-        combined, status = self.get_mfcc_with_deltas_with_status(
-            track_id, flatten=False, use_cache=use_cache
-        )
-
-        if not status["success"] or combined is None:
-            self._failed_tracks.add(track_id)
-            if status.get("success") is None or status["success"] is False:
-                pass
-            else:
-                status["success"] = False
-                status["error_type"] = "no_data"
-                status["error_message"] = "No MFCC data returned"
-            return None, status
-
-        combined = combined.astype(np.float32)
-        n_channels, n_frames = combined.shape
-
-        if n_frames < target_frames:
-            pad_width = ((0, 0), (0, target_frames - n_frames))
-            combined = np.pad(combined, pad_width, mode="constant")
-        else:
-            start = (n_frames - target_frames) // 2
-            combined = combined[:, start : start + target_frames]
-
-        if use_cache and self.use_disk_cache:
-            self._save_to_cache(track_id, "cnn_ready", combined)
-
-        return combined, status
-
-    def prepare_for_cnn(
-        self,
-        track_id: int,
-        target_frames: int = 128,
-    ) -> Optional[np.ndarray]:
-        """
-        Prepare CNN-ready MFCC (compatibility wrapper).
-
-        Prefer prepare_for_cnn_with_status for new code.
-        """
-        mfcc, _ = self.prepare_for_cnn_with_status(track_id, target_frames)
-        return mfcc
-
     def extract_batch_with_status(
-        self,
-        track_ids: List[int],
-        target_frames: int = 128,
+        self, track_ids: List[int], target_frames: int = 128,
     ) -> Tuple[Dict[int, Optional[np.ndarray]], Dict[int, Dict[str, Any]]]:
-        """
-        Extract CNN-ready MFCC for a batch of tracks.
-
-        Processes tracks sequentially. Logs aggregate cache hit/miss
-        statistics and failure summary on completion.
-
-        Args:
-            track_ids: List of track identifiers to process.
-            target_frames: Target number of time frames per track.
-
-        Returns:
-            Tuple of (results_dict, status_dict).
-            - results_dict: {track_id: np.ndarray or None}
-            - status_dict: {track_id: status_dict}
-        """
+        """Extract CNN-ready MFCC for a batch (legacy)."""
         results: Dict[int, Optional[np.ndarray]] = {}
         status_results: Dict[int, Dict[str, Any]] = {}
         total = len(track_ids)
-
         cache_hits = 0
         cache_misses = 0
         failed: List[int] = []
-
         for i, track_id in enumerate(track_ids):
-            if total >= 200 and (i + 1) % 50 == 0:
-                hit_rate = (
-                    cache_hits / (cache_hits + cache_misses)
-                    if (cache_hits + cache_misses) > 0
-                    else 0.0
-                )
-                logger.debug(
-                    "Batch MFCC progress: %d/%d tracks "
-                    "(failed: %d, cache hit: %.1f%%)",
-                    i + 1,
-                    total,
-                    len(failed),
-                    100 * hit_rate,
-                )
-
+            if total >= 500 and (i + 1) % 100 == 0:
+                hit_rate = cache_hits / (cache_hits + cache_misses) if (cache_hits + cache_misses) > 0 else 0.0
+                logger.info("Batch MFCC progress: %d/%d tracks (failed: %d, cache hit: %.1f%%)",
+                            i + 1, total, len(failed), 100 * hit_rate)
             mfcc, status = self.prepare_for_cnn_with_status(track_id, target_frames)
             results[track_id] = mfcc
             status_results[track_id] = status
-
             if status.get("loaded_from_cache", False):
                 cache_hits += 1
             else:
                 cache_misses += 1
-
             if not status["success"]:
                 failed.append(track_id)
-
         n_failed = len(failed)
         n_success = total - n_failed
-        hit_rate = (
-            cache_hits / (cache_hits + cache_misses)
-            if (cache_hits + cache_misses) > 0
-            else 0.0
-        )
-
-        logger.info(
-            "Batch MFCC complete: %d/%d tracks extracted "
-            "(cache hit: %.1f%%, failed: %d)",
-            n_success,
-            total,
-            100 * hit_rate,
-            n_failed,
-        )
-
+        hit_rate = cache_hits / (cache_hits + cache_misses) if (cache_hits + cache_misses) > 0 else 0.0
+        logger.info("Batch MFCC complete: %d/%d tracks extracted (cache hit: %.1f%%, failed: %d)",
+                    n_success, total, 100 * hit_rate, n_failed)
         if n_failed > 0:
-            logger.warning(
-                "Failed tracks in batch: %s",
-                failed[:10] if len(failed) > 10 else failed,
-            )
-
+            logger.warning("Failed tracks in batch: %s", failed[:10] if len(failed) > 10 else failed)
         return results, status_results
 
-    def get_failed_tracks_report(
-        self, status_results: Dict[int, Dict[str, Any]]
-    ) -> Dict[str, Any]:
-        """
-        Aggregate error statistics from a batch status dictionary.
-
-        Args:
-            status_results: Per-track status dicts from extract_batch_with_status.
-
-        Returns:
-            Report with keys: total_processed, failed_count, failed_tracks,
-            failed_by_type, success_rate.
-        """
+    def get_failed_tracks_report(self, status_results: Dict[int, Dict[str, Any]]) -> Dict[str, Any]:
+        """Aggregate error statistics (legacy)."""
         failed_by_type: Dict[str, List[int]] = {}
         failed_tracks: List[int] = []
-
         for track_id, status in status_results.items():
             if not status["success"]:
                 failed_tracks.append(track_id)
@@ -753,136 +720,71 @@ class MFCCExtractor:
                 if error_type not in failed_by_type:
                     failed_by_type[error_type] = []
                 failed_by_type[error_type].append(track_id)
-
         total = len(status_results)
         n_failed = len(failed_tracks)
-
         return {
-            "total_processed": total,
-            "failed_count": n_failed,
-            "failed_tracks": failed_tracks,
-            "failed_by_type": failed_by_type,
+            "total_processed": total, "failed_count": n_failed,
+            "failed_tracks": failed_tracks, "failed_by_type": failed_by_type,
             "success_rate": (total - n_failed) / total if total > 0 else 0.0,
         }
 
     def get_cache_stats(self) -> Dict[str, Any]:
-        """
-        Collect statistics about the disk cache for this configuration.
-
-        Returns:
-            Dictionary with total file count, size in MB, and per-tier
-            breakdown. If disk cache is disabled, returns {'enabled': False}.
-        """
+        """Collect statistics about the disk cache."""
         if not self.use_disk_cache or not self.cache_subdir.exists():
             return {"enabled": False}
-
         cache_files = list(self.cache_subdir.glob("*"))
         cache_size_bytes = sum(f.stat().st_size for f in cache_files)
-
-        tiers = {}
-        for cache_type in ["full", "base", "deltas", "cnn"]:
-            pattern = f"*.{cache_type}.*"
-            files = list(self.cache_subdir.glob(pattern))
-            tiers[cache_type] = {
-                "count": len(files),
-                "size_mb": sum(f.stat().st_size for f in files) / (1024 ** 2),
-            }
-
         return {
             "enabled": True,
             "cache_dir": str(self.cache_subdir),
             "total_files": len(cache_files),
             "total_size_mb": cache_size_bytes / (1024 ** 2),
-            "by_type": tiers,
         }
 
     def print_cache_stats(self) -> None:
-        """
-        Print a human-readable summary of the disk cache state.
-
-        This is a manual debugging/exploration utility.
-        """
+        """Print a human-readable summary of the disk cache state."""
         stats = self.get_cache_stats()
-
         if not stats["enabled"]:
             print("Disk cache is disabled.")
             return
-
         print("=" * 60)
         print("MFCC CACHE STATISTICS")
         print("=" * 60)
         print(f"Directory:    {stats['cache_dir']}")
         print(f"Total files:  {stats['total_files']}")
         print(f"Total size:   {stats['total_size_mb']:.2f} MB")
-        print("\nBy tier:")
-        for cache_type, data in stats["by_type"].items():
-            if data["count"] > 0:
-                print(f"  {cache_type}: {data['count']} files, "
-                      f"{data['size_mb']:.2f} MB")
 
     def clear_cache(self) -> None:
-        """
-        Remove all cached MFCC features for this configuration.
-
-        Deletes the entire cache subdirectory and recreates it empty.
-        Also clears the failed tracks set.
-        """
+        """Remove all cached MFCC features for this configuration."""
         if not self.use_disk_cache or not self.cache_subdir.exists():
-            logger.debug("No cache to clear (disabled or empty)")
             return
-
-        import shutil
-
         file_count = len(list(self.cache_subdir.glob("*")))
-        size_mb = (
-            sum(f.stat().st_size for f in self.cache_subdir.glob("*"))
-            / (1024 ** 2)
-        )
-
+        size_mb = sum(f.stat().st_size for f in self.cache_subdir.glob("*")) / (1024 ** 2)
         shutil.rmtree(self.cache_subdir)
         self.cache_subdir.mkdir(parents=True, exist_ok=True)
         self._failed_tracks.clear()
-
-        logger.info(
-            "MFCC cache cleared: %s (%d files, %.1f MB freed, "
-            "failed tracks reset)",
-            self.cache_subdir,
-            file_count,
-            size_mb,
-        )
+        logger.info("MFCC cache cleared: %s (%d files, %.1f MB freed, failed tracks reset)",
+                     self.cache_subdir, file_count, size_mb)
 
 
 if __name__ == "__main__":
     from src.utils.logging_utils import setup_logging
-    setup_logging(level=logging.DEBUG, mode="console")
+    setup_logging(level=logging.INFO, mode="console")
 
     extractor = MFCCExtractor()
-
     extractor.print_cache_stats()
 
-    test_tracks = [2, 3, 5, 10, 20]
+    test_tracks = [2, 3, 5]
     print(f"\nTest tracks: {test_tracks}")
 
     for track_id in test_tracks:
         print(f"\n--- Track {track_id} ---")
-        mfcc = extractor.prepare_for_cnn(track_id, target_frames=128)
-        if mfcc is not None:
-            print(f"  OK: shape = {mfcc.shape}")
-        else:
-            print(f"  FAILED")
+        crops = extractor.prepare_crops_for_track(track_id, target_frames=430, n_crops=3, mode="train")
+        for i, crop in enumerate(crops):
+            if crop is not None:
+                print(f"  Crop {i}: shape={crop.shape}, mean={crop.mean():.4f}, std={crop.std():.4f}")
+            else:
+                print(f"  Crop {i}: FAILED")
 
     print()
     extractor.print_cache_stats()
-
-    print(f"\nFailed tracks recorded: {extractor.failed_track_count}")
-
-    print("\n" + "=" * 60)
-    print("Cache file listing for track 2:")
-    print("=" * 60)
-    cache_paths = extractor._get_cache_paths(2)
-    for cache_type, path in cache_paths.items():
-        if path.exists():
-            print(f"  {cache_type}: {path.name} "
-                  f"({path.stat().st_size / 1024:.1f} KB)")
-        else:
-            print(f"  {cache_type}: {path.name} (missing)")

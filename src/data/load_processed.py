@@ -1,5 +1,4 @@
 """
-src/data/load_processed.py
 Fast loading of preprocessed data from cache.
 
 Provides convenient access to datasets that have already been prepared
@@ -22,6 +21,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import joblib
 import numpy as np
 import pandas as pd
 
@@ -52,7 +52,7 @@ class LoadProcessedData:
         subset: Optional[str] = None,
         min_samples_per_genre: Optional[int] = None,
         dataset_id: Optional[str] = None,
-    ):
+    ) -> None:
         """
         Initialize the data loader for a specific dataset configuration.
 
@@ -196,7 +196,9 @@ class LoadProcessedData:
             val_indices = np.load(self.data_dir / "val_indices.npy")
             test_indices = np.load(self.data_dir / "test_indices.npy")
         else:
-            train_indices = val_indices = test_indices = None
+            train_indices = None
+            val_indices = None
+            test_indices = None
             logger.debug("Track indices not found in cache")
 
         with open(self._get_metadata_path(), "r") as f:
@@ -206,7 +208,6 @@ class LoadProcessedData:
         scaler = None
         preprocessor_path = self.processors_dir / f"preprocessor_{self.dataset_id}.pkl"
         if preprocessor_path.exists():
-            import joblib
             preprocessor_state = joblib.load(preprocessor_path)
             label_encoder = preprocessor_state["label_encoder"]
             scaler = preprocessor_state["scaler"]
@@ -302,11 +303,6 @@ class LoadProcessedData:
         print(f"  Processors:   {self.processors_dir}")
 
 
-# ============================================================================
-# CONVENIENCE FUNCTIONS
-# ============================================================================
-
-
 def load_data(
     subset: Optional[str] = None,
     min_samples_per_genre: int = 100,
@@ -328,8 +324,8 @@ def load_data(
         Data dictionary with X_train, y_train, etc.
 
     Example:
-        data = load_data(subset="medium", min_samples_per_genre=100)
-        X_train, y_train = data['X_train'], data['y_train']
+        >>> data = load_data(subset="medium", min_samples_per_genre=100)
+        >>> X_train, y_train = data['X_train'], data['y_train']
     """
     loader = LoadProcessedData(
         subset=subset,
@@ -374,14 +370,13 @@ def list_datasets() -> List[str]:
         Sorted list of dataset_id strings.
 
     Example:
-        for ds in list_datasets():
-            print(ds)
+        >>> for ds in list_datasets():
+        ...     print(ds)
     """
     loader = LoadProcessedData()
     return loader.list_available_datasets()
 
 
-# Short aliases for interactive use
 load = load_data
 list_ds = list_datasets
 

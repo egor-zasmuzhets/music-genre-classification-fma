@@ -1,5 +1,4 @@
 """
-src/utils/logging_utils.py
 Flexible logging utilities with configurable output modes.
 
 Provides a unified logging setup with support for:
@@ -38,10 +37,6 @@ from enum import Enum
 import yaml
 
 
-# ============================================================================
-# LOGGING MODE
-# ============================================================================
-
 class LoggingMode(Enum):
     """
     Output modes for the logging system.
@@ -58,23 +53,32 @@ class LoggingMode(Enum):
     SILENT = "silent"
 
 
-# ============================================================================
-# CRITICAL ERROR BUFFER (for silent mode)
-# ============================================================================
-
 class CriticalErrorBuffer(io.StringIO):
     """
     In-memory buffer that captures critical messages during silent mode.
 
     Allows retrieval of suppressed critical errors for post-hoc review
     without any console or file output during operation.
+
+    Attributes:
+        critical_count: Number of critical messages captured in the buffer.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize an empty buffer with zero critical message count."""
         super().__init__()
         self._critical_count = 0
 
     def write(self, s: str) -> int:
+        """
+        Write a string to the buffer, incrementing counter for non-empty lines.
+
+        Args:
+            s: String to write to the buffer.
+
+        Returns:
+            Number of characters written.
+        """
         if s.strip():
             self._critical_count += 1
         return super().write(s)
@@ -85,7 +89,7 @@ class CriticalErrorBuffer(io.StringIO):
         return self._critical_count
 
     def get_messages(self) -> str:
-        """Retrieve all buffered critical messages."""
+        """Retrieve all buffered critical messages as a single string."""
         return self.getvalue()
 
     def flush_to_stderr(self) -> None:
@@ -95,10 +99,6 @@ class CriticalErrorBuffer(io.StringIO):
             sys.stderr.write(content)
             sys.stderr.flush()
 
-
-# ============================================================================
-# COLORED FORMATTER (console)
-# ============================================================================
 
 class ColoredFormatter(logging.Formatter):
     """
@@ -113,22 +113,36 @@ class ColoredFormatter(logging.Formatter):
     """
 
     COLOR_MAP = {
-        logging.DEBUG: "\033[2m",       # dim
-        logging.INFO: "\033[0m",         # reset/default
-        logging.WARNING: "\033[33m",     # yellow
-        logging.ERROR: "\033[31m",       # red
-        logging.CRITICAL: "\033[41m",    # red background
+        logging.DEBUG: "\033[2m",
+        logging.INFO: "\033[0m",
+        logging.WARNING: "\033[33m",
+        logging.ERROR: "\033[31m",
+        logging.CRITICAL: "\033[41m",
     }
     RESET = "\033[0m"
 
     def format(self, record: logging.LogRecord) -> str:
+        """
+        Format a log record with ANSI color codes.
+
+        Args:
+            record: Log record to format.
+
+        Returns:
+            Colorized log message string.
+        """
         color = self.COLOR_MAP.get(record.levelno, self.RESET)
         message = super().format(record)
         return f"{color}{message}{self.RESET}"
 
     @classmethod
     def supports_color(cls) -> bool:
-        """Check if the terminal supports ANSI color codes."""
+        """
+        Check if the terminal supports ANSI color codes.
+
+        Returns:
+            True if the terminal supports colors, False otherwise.
+        """
         if not sys.stderr.isatty():
             return False
         if sys.platform == "win32":
@@ -142,10 +156,6 @@ class ColoredFormatter(logging.Formatter):
         return True
 
 
-# ============================================================================
-# PATH RESOLUTION FROM CONFIG
-# ============================================================================
-
 def _find_project_root() -> Path:
     """
     Locate the project root by searching for 'configs/paths.yaml'.
@@ -154,6 +164,9 @@ def _find_project_root() -> Path:
 
     Returns:
         Absolute path to the project root.
+
+    Raises:
+        FileNotFoundError: If project root cannot be located.
     """
     current = Path(__file__).resolve().parent
     while current != current.parent:
@@ -207,13 +220,6 @@ def _get_default_log_dir() -> Path:
 _PROJECT_ROOT = _find_project_root()
 _DEFAULT_LOG_DIR = _get_default_log_dir()
 
-
-# ============================================================================
-# THIRD-PARTY LOGGER SUPPRESSION
-# ============================================================================
-
-# Loggers from these namespaces are forced to WARNING or higher
-# to prevent debug spam from JIT compilers, audio backends, etc.
 _NOISY_THIRD_PARTY_LOGGERS = [
     "numba",
     "numba.core",
@@ -237,10 +243,6 @@ def _silence_noisy_loggers() -> None:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 
-# ============================================================================
-# LOGGING SETUP
-# ============================================================================
-
 class LoggingConfig:
     """
     Master logging configuration controller.
@@ -259,7 +261,6 @@ class LoggingConfig:
         root_level: Root logger severity threshold.
         console_level: Console output severity threshold.
         file_level: File output severity threshold.
-        _buffer: Critical error buffer for silent mode.
     """
 
     def __init__(
@@ -270,7 +271,7 @@ class LoggingConfig:
         console_level: Optional[Union[int, str]] = None,
         file_level: Optional[Union[int, str]] = None,
         use_colors: Optional[bool] = None,
-    ):
+    ) -> None:
         """
         Initialize logging configuration.
 
@@ -289,19 +290,16 @@ class LoggingConfig:
                         If None, auto-detects terminal support.
 
         Example:
-            # Training: minimal console, detailed file
-            LoggingConfig(
-                level=logging.DEBUG,
-                mode="both",
-                console_level=logging.WARNING,
-                log_file="logs/training.log"
-            )
+            >>> LoggingConfig(
+            ...     level=logging.DEBUG,
+            ...     mode="both",
+            ...     console_level=logging.WARNING,
+            ...     log_file="logs/training.log"
+            ... )
 
-            # Debugging: everything to console
-            LoggingConfig(level=logging.DEBUG, mode="console")
+            >>> LoggingConfig(level=logging.DEBUG, mode="console")
 
-            # Silence everything
-            LoggingConfig(mode="silent")
+            >>> LoggingConfig(mode="silent")
         """
         self.mode = LoggingMode(mode) if isinstance(mode, str) else mode
         self._level = self._resolve_level(level)
@@ -448,10 +446,6 @@ class LoggingConfig:
         )
 
 
-# ============================================================================
-# MIXIN FOR CLASSES
-# ============================================================================
-
 class LoggingMixin:
     """
     Mixin that provides a pre-configured logger to any class.
@@ -478,10 +472,6 @@ class LoggingMixin:
             self._logger = logging.getLogger(name)
         return self._logger
 
-
-# ============================================================================
-# CONVENIENCE SHORTCUT
-# ============================================================================
 
 _logging_config: Optional[LoggingConfig] = None
 
@@ -519,8 +509,8 @@ def setup_logging(
         The active LoggingConfig instance.
 
     Example:
-        setup_logging(level=logging.DEBUG, mode="both",
-                      console_level=logging.WARNING)
+        >>> setup_logging(level=logging.DEBUG, mode="both",
+        ...               console_level=logging.WARNING)
     """
     global _logging_config
     _logging_config = LoggingConfig(
@@ -535,13 +525,14 @@ def setup_logging(
 
 
 def get_logging_config() -> Optional[LoggingConfig]:
-    """Return the currently active LoggingConfig, or None if not yet set up."""
+    """
+    Return the currently active LoggingConfig.
+
+    Returns:
+        The active LoggingConfig instance, or None if not yet set up.
+    """
     return _logging_config
 
-
-# ============================================================================
-# MAIN GUARD (self-test)
-# ============================================================================
 
 if __name__ == "__main__":
     print("=== Console mode (DEBUG) ===")
@@ -552,7 +543,6 @@ if __name__ == "__main__":
     logger.warning("Warning message")
     logger.error("Error message")
 
-    # Verify third-party suppression
     numba_logger = logging.getLogger("numba.core.byteflow")
     print(f"\nThird-party logger check:")
     print(f"  numba.core.byteflow level: {logging.getLevelName(numba_logger.level)}")

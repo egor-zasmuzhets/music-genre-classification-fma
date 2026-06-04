@@ -1,5 +1,4 @@
 """
-src/data/audio_loader.py
 Audio file loader — reads MP3s directly from FMA ZIP archives.
 
 Provides lazy ZIP access, multi-level caching (memory + disk), automatic
@@ -24,6 +23,7 @@ Typical usage:
 import hashlib
 import io
 import logging
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -63,7 +63,7 @@ class AudioLoader:
         use_cache: bool = True,
         use_disk_cache: bool = False,
         disk_cache_dir: Optional[Path] = None,
-    ):
+    ) -> None:
         """
         Initialize the audio loader with the specified ZIP archive.
 
@@ -263,7 +263,6 @@ class AudioLoader:
             "duration": duration,
         }
 
-        # 1. Disk cache
         audio = self._load_from_disk_cache(track_id, sr, duration)
         if audio is not None:
             status["success"] = True
@@ -271,7 +270,6 @@ class AudioLoader:
             status["cache_type"] = "disk"
             return audio, status
 
-        # 2. Memory cache
         cache_key = (track_id, sr, duration, offset)
         if use_cache and self.use_cache and cache_key in self._cached_audio:
             status["success"] = True
@@ -279,7 +277,6 @@ class AudioLoader:
             status["cache_type"] = "memory"
             return self._cached_audio[cache_key], status
 
-        # 3. Load from ZIP
         try:
             audio_path = self.get_audio_path(track_id)
 
@@ -310,18 +307,15 @@ class AudioLoader:
                 res_type="kaiser_fast",
             )
 
-            # Pad or trim to exact length
             expected_length = int(sr * duration)
             if len(audio) < expected_length:
                 audio = np.pad(audio, (0, expected_length - len(audio)))
             else:
                 audio = audio[:expected_length]
 
-            # Save to disk cache
             if self.use_disk_cache:
                 self._save_to_disk_cache(audio, track_id, sr, duration)
 
-            # Save to memory cache
             if (
                 use_cache
                 and self.use_cache
@@ -524,8 +518,6 @@ class AudioLoader:
         """Remove all files from the disk cache directory."""
         if not self.disk_cache_dir.exists():
             return
-
-        import shutil
 
         file_count = len(list(self.disk_cache_dir.glob("*")))
         size_mb = (

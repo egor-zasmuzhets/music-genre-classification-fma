@@ -1,5 +1,4 @@
 """
-src/training/train_cnn_debug.py
 Minimal CNN training script for pipeline validation and debugging.
 
 Trains a lightweight MiniCNN on MFCC features to verify that the full
@@ -37,10 +36,6 @@ from src.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
-
-# ============================================================================
-# TRAINING & VALIDATION LOOPS
-# ============================================================================
 
 def _prepare_input(x: torch.Tensor) -> torch.Tensor:
     """
@@ -100,7 +95,7 @@ def train_one_epoch(
         correct += (out.argmax(1) == y).sum().item()
         total += y.size(0)
 
-    avg_loss = total_loss / len(loader)
+    avg_loss = total_loss / len(loader) if len(loader) > 0 else 0.0
     accuracy = correct / total if total > 0 else 0.0
 
     return avg_loss, accuracy
@@ -141,15 +136,11 @@ def validate(
         correct += (out.argmax(1) == y).sum().item()
         total += y.size(0)
 
-    avg_loss = total_loss / len(loader)
+    avg_loss = total_loss / len(loader) if len(loader) > 0 else 0.0
     accuracy = correct / total if total > 0 else 0.0
 
     return avg_loss, accuracy
 
-
-# ============================================================================
-# PER-CLASS ACCURACY
-# ============================================================================
 
 @torch.no_grad()
 def compute_per_class_accuracy(
@@ -171,8 +162,8 @@ def compute_per_class_accuracy(
         1D tensor of per-class accuracy values (length n_classes).
     """
     model.eval()
-    class_correct = torch.zeros(n_classes)
-    class_total = torch.zeros(n_classes)
+    class_correct = torch.zeros(n_classes, device=device)
+    class_total = torch.zeros(n_classes, device=device)
 
     for x, y in loader:
         x = _prepare_input(x).to(device)
@@ -195,10 +186,6 @@ def compute_per_class_accuracy(
 
     return per_class_acc
 
-
-# ============================================================================
-# MAIN TRAINING FUNCTION
-# ============================================================================
 
 def debug_train(
     subset: str = "small",
@@ -265,7 +252,7 @@ def debug_train(
 
     logger.info("Validating DataLoaders...")
     train_batch = check_dataloader(train_loader, "train")
-    val_batch = check_dataloader(val_loader, "val")
+    check_dataloader(val_loader, "val")
 
     sample_x = train_batch[0]
     if sample_x.dim() == 4 and sample_x.shape[2] == 1:
@@ -387,10 +374,6 @@ def debug_train(
         "config": config,
     }
 
-
-# ============================================================================
-# MAIN GUARD
-# ============================================================================
 
 if __name__ == "__main__":
     setup_logging(level="INFO", mode="console")

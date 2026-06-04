@@ -1,5 +1,4 @@
 """
-src/training/metrics_tracker_debug.py
 Lightweight metrics tracker for training loop debugging and visualization.
 
 Stores per-epoch loss and accuracy values, generates simple side-by-side
@@ -46,7 +45,7 @@ class DebugTracker:
         accs: List of per-epoch accuracy values.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize an empty tracker."""
         self.losses: List[float] = []
         self.accs: List[float] = []
@@ -64,8 +63,8 @@ class DebugTracker:
         self.losses.append(loss)
         self.accs.append(acc)
 
-        logger.debug(
-            "Epoch %d recorded — loss=%.4f, acc=%.4f",
+        logger.info(
+            "Epoch %d — loss=%.4f, acc=%.4f",
             len(self.losses),
             loss,
             acc,
@@ -101,7 +100,6 @@ class DebugTracker:
         ax2.set_ylabel("Accuracy")
         ax2.grid(True, alpha=0.3)
 
-        # Add final value annotations
         if self.losses:
             ax1.annotate(
                 f"{self.losses[-1]:.4f}",
@@ -179,19 +177,18 @@ class DebugTracker:
             print("No metrics recorded yet.")
             return
 
+        best_acc = max(self.accs)
+        best_epoch = self.accs.index(best_acc) + 1
+
         print("=" * 40)
         print("DEBUG TRACKER SUMMARY")
         print("=" * 40)
         print(f"Epochs recorded: {len(self.losses)}")
         print(f"Final loss:      {self.losses[-1]:.4f}")
         print(f"Final accuracy:  {self.accs[-1]:.4f}")
-        print(f"Best accuracy:   {max(self.accs):.4f} (epoch {self.accs.index(max(self.accs)) + 1})")
+        print(f"Best accuracy:   {best_acc:.4f} (epoch {best_epoch})")
         print("=" * 40)
 
-
-# ============================================================================
-# DATALOADER DIAGNOSTICS
-# ============================================================================
 
 def check_dataloader(
     loader: DataLoader,
