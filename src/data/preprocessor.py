@@ -10,6 +10,11 @@ Provides a scikit-learn-compatible preprocessing pipeline that:
 All fit operations are performed exclusively on the training set to prevent
 data leakage. Validation and test sets are only transformed.
 
+V2 Changes:
+- State is stored as JSON (safe, readable, cross-platform)
+- Save/load use directory structure with multiple JSON files
+- No legacy joblib/pickle support
+
 Typical usage:
     from src.data.preprocessor import DataPreprocessor
 
@@ -24,15 +29,16 @@ Typical usage:
     # Normalize features (fit on train only)
     X_train, X_val, X_test = preprocessor.normalize_features(X_train_raw, X_val_raw, X_test_raw)
 
-    # Get class weights for loss weighting
-    class_weights = preprocessor.get_class_weights(y_train)
+    # Save/load (V2)
+    preprocessor.save(Path("preprocessor/"))
+    preprocessor.load(Path("preprocessor/"))
 """
 
+import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
-import joblib
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder, StandardScaler
@@ -56,6 +62,8 @@ class DataPreprocessor:
     fit is always called on training data only, transform is applied
     to validation and test sets to prevent information leakage.
 
+    V2: State is stored as JSON (safe, readable) in a directory.
+
     Attributes:
         min_samples_per_genre: Minimum track count required to retain a genre.
         label_encoder: Fitted sklearn LabelEncoder instance.
@@ -68,18 +76,14 @@ class DataPreprocessor:
 
         Args:
             min_samples_per_genre: Minimum number of tracks a genre must have
-                                   to be retained. Genres with fewer samples
-                                   are discarded. Default is 100.
+                                   to be retained. Default is 100.
         """
         self.min_samples_per_genre = min_samples_per_genre
         self.label_encoder = LabelEncoder()
         self.scaler = StandardScaler()
         self._is_fitted = False
 
-        logger.debug(
-            "DataPreprocessor initialized (min_samples_per_genre=%d)",
-            min_samples_per_genre
-        )
+        logger.debug("DataPreprocessor initialized (min_samples_per_genre=%d)", min_samples_per_genre)
 
     def filter_rare_genres(
         self,
@@ -89,27 +93,18 @@ class DataPreprocessor:
         """
         Remove genres with fewer than min_samples_per_genre tracks.
 
-        Analyzes the distribution of genres in the dataset and retains
-        only those meeting the minimum sample threshold. Tracks belonging
-        to rare genres are dropped entirely.
-
         Args:
             tracks_df: DataFrame containing track metadata with genre labels.
-            genre_col: Multi-index column tuple identifying the genre column
-                       (e.g., ('track', 'genre_top')).
+            genre_col: Multi-index column tuple (e.g., ('track', 'genre_top')).
 
         Returns:
-            Filtered DataFrame containing only tracks from sufficiently
-            represented genres.
+            Filtered DataFrame with only sufficiently represented genres.
 
         Raises:
-            KeyError: If the specified genre column is not found in the DataFrame.
+            KeyError: If the specified genre column is not found.
         """
         if genre_col not in tracks_df.columns:
-            raise KeyError(
-                f"Genre column {genre_col} not found. "
-                f"Available columns: {list(tracks_df.columns)}"
-            )
+            raise KeyError(f"Genre column {genre_col} not found")
 
         genre_counts = tracks_df[genre_col].value_counts()
         rare_mask = genre_counts < self.min_samples_per_genre
@@ -125,17 +120,13 @@ class DataPreprocessor:
             removed_tracks = genre_counts[rare_mask].sum()
             logger.info(
                 "Removed %d rare genres (%d tracks): %s",
-                len(rare_genres),
-                removed_tracks,
-                ", ".join(f"{g}({genre_counts[g]})" for g in rare_genres)
+                len(rare_genres), removed_tracks,
+                ", ".join(f"{g}({genre_counts[g]})" for g in rare_genres[:5])
             )
 
         logger.info(
-            "Genre filtering complete: %d genres retained, "
-            "%d tracks remaining (removed %d, %.1f%%)",
-            len(common_genres),
-            n_total_after,
-            n_removed,
+            "Genre filtering: %d genres retained, %d tracks (removed %d, %.1f%%)",
+            len(common_genres), n_total_after, n_removed,
             100 * n_removed / n_total_before if n_total_before else 0
         )
 
@@ -150,9 +141,7 @@ class DataPreprocessor:
         """
         Encode string genre labels to integer class IDs.
 
-        Fits the LabelEncoder on the training set and transforms validation
-        and test sets using the same encoding. This ensures consistent
-        label-to-ID mapping across all splits.
+        Fits LabelEncoder on training set, transforms validation and test sets.
 
         Args:
             y_train: Training set genre labels (raw strings).
@@ -161,24 +150,14 @@ class DataPreprocessor:
 
         Returns:
             Tuple of (y_train_encoded, y_val_encoded, y_test_encoded).
-            val/test entries are None if the corresponding input was None.
         """
         y_train_encoded = self.label_encoder.fit_transform(y_train)
         n_classes = len(self.label_encoder.classes_)
 
-        y_val_encoded = None
-        if y_val is not None:
-            y_val_encoded = self.label_encoder.transform(y_val)
-
-        y_test_encoded = None
-        if y_test is not None:
-            y_test_encoded = self.label_encoder.transform(y_test)
+        y_val_encoded = self.label_encoder.transform(y_val) if y_val is not None else None
+        y_test_encoded = self.label_encoder.transform(y_test) if y_test is not None else None
 
         logger.info("Label encoding complete: %d classes", n_classes)
-        logger.debug(
-            "Class mapping: %s",
-            {i: name for i, name in enumerate(self.label_encoder.classes_)}
-        )
 
         return y_train_encoded, y_val_encoded, y_test_encoded
 
@@ -191,8 +170,7 @@ class DataPreprocessor:
         """
         Normalize feature vectors to zero mean and unit variance.
 
-        Fits the StandardScaler on the training set only and transforms
-        validation and test sets using the learned statistics.
+        Fits StandardScaler on training set, transforms validation and test sets.
 
         Args:
             X_train: Training set feature matrix.
@@ -201,41 +179,18 @@ class DataPreprocessor:
 
         Returns:
             Tuple of (X_train_scaled, X_val_scaled, X_test_scaled).
-            val/test entries are None if the corresponding input was None.
         """
         X_train_scaled = self.scaler.fit_transform(X_train)
-
-        X_val_scaled = None
-        if X_val is not None:
-            X_val_scaled = self.scaler.transform(X_val)
-
-        X_test_scaled = None
-        if X_test is not None:
-            X_test_scaled = self.scaler.transform(X_test)
+        X_val_scaled = self.scaler.transform(X_val) if X_val is not None else None
+        X_test_scaled = self.scaler.transform(X_test) if X_test is not None else None
 
         self._is_fitted = True
         n_features = X_train_scaled.shape[1]
 
         logger.info(
-            "Feature normalization complete: %d features, "
-            "train mean=%.4f, train std=%.4f",
-            n_features,
-            float(X_train_scaled.mean()),
-            float(X_train_scaled.std())
+            "Feature normalization: %d features, mean=%.4f, std=%.4f",
+            n_features, float(X_train_scaled.mean()), float(X_train_scaled.std())
         )
-
-        if X_val_scaled is not None:
-            logger.debug(
-                "Validation stats — mean=%.4f, std=%.4f",
-                float(X_val_scaled.mean()),
-                float(X_val_scaled.std())
-            )
-        if X_test_scaled is not None:
-            logger.debug(
-                "Test stats — mean=%.4f, std=%.4f",
-                float(X_test_scaled.mean()),
-                float(X_test_scaled.std())
-            )
 
         return X_train_scaled, X_val_scaled, X_test_scaled
 
@@ -245,10 +200,6 @@ class DataPreprocessor:
 
         Uses sklearn's 'balanced' strategy:
         weight = n_samples / (n_classes * n_samples_per_class)
-
-        These weights can be passed directly to loss functions in
-        scikit-learn, XGBoost, or PyTorch to penalize errors on
-        underrepresented classes more heavily.
 
         Args:
             y_train: Encoded training labels (integer class IDs).
@@ -260,72 +211,138 @@ class DataPreprocessor:
         weights = compute_class_weight('balanced', classes=classes, y=y_train)
         weight_dict = dict(zip(classes, weights))
 
-        min_weight = min(weight_dict.values()) if weight_dict else 0.0
-        max_weight = max(weight_dict.values()) if weight_dict else 0.0
-        ratio = max_weight / min_weight if min_weight > 0 else float('inf')
+        min_w = min(weight_dict.values()) if weight_dict else 0.0
+        max_w = max(weight_dict.values()) if weight_dict else 0.0
 
         logger.info(
-            "Class weights computed for %d classes (min=%.3f, max=%.3f, ratio=%.1f:1)",
-            len(weight_dict),
-            min_weight,
-            max_weight,
-            ratio
+            "Class weights: %d classes (min=%.3f, max=%.3f, ratio=%.1f:1)",
+            len(weight_dict), min_w, max_w, max_w / min_w if min_w > 0 else float('inf')
         )
-        logger.debug("Class weight details: %s", weight_dict)
 
         return weight_dict
 
-    def save(self, path: Path) -> None:
-        """
-        Persist the preprocessor state to disk.
+    def _extract_label_encoder_state(self) -> Dict:
+        """Extract LabelEncoder state as JSON-serializable dict."""
+        return {
+            "classes": self.label_encoder.classes_.tolist(),
+            "type": "LabelEncoder",
+            "version": 2
+        }
 
-        Saves the fitted LabelEncoder, StandardScaler, and configuration
-        parameters as a joblib archive. The saved preprocessor can be
-        reloaded with load() for inference without refitting.
+    def _extract_scaler_state(self) -> Dict:
+        """Extract StandardScaler state as JSON-serializable dict."""
+        state = {
+            "type": "StandardScaler",
+            "version": 2,
+            "n_features": getattr(self.scaler, 'n_features_in_', None)
+        }
+        if hasattr(self.scaler, 'mean_') and self.scaler.mean_ is not None:
+            state["mean"] = self.scaler.mean_.tolist()
+        if hasattr(self.scaler, 'scale_') and self.scaler.scale_ is not None:
+            state["scale"] = self.scaler.scale_.tolist()
+        return state
+
+    def _restore_label_encoder(self, state: Dict) -> None:
+        """Restore LabelEncoder from JSON state."""
+        classes = state.get("classes", [])
+        if classes:
+            self.label_encoder.classes_ = np.array(classes)
+
+    def _restore_scaler(self, state: Dict) -> None:
+        """Restore StandardScaler from JSON state."""
+        mean = state.get("mean")
+        scale = state.get("scale")
+
+        if mean is not None:
+            self.scaler.mean_ = np.array(mean)
+        if scale is not None:
+            self.scaler.scale_ = np.array(scale)
+
+        n_features = state.get("n_features")
+        if n_features is not None:
+            self.scaler.n_features_in_ = n_features
+
+    def save(self, path: Union[Path, str]) -> None:
+        """
+        Persist the preprocessor state to disk as JSON files.
+
+        Creates a directory with three JSON files:
+        - scaler.json: mean, scale, n_features
+        - label_encoder.json: classes list
+        - config.json: min_samples_per_genre, is_fitted
 
         Args:
-            path: File path for the saved preprocessor (e.g., .pkl or .joblib).
+            path: Directory path where JSON files will be saved.
         """
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True)
 
-        state = {
-            'label_encoder': self.label_encoder,
-            'scaler': self.scaler,
-            'min_samples_per_genre': self.min_samples_per_genre
+        scaler_state = self._extract_scaler_state()
+        with open(path / "scaler.json", 'w', encoding='utf-8') as f:
+            json.dump(scaler_state, f, indent=2, ensure_ascii=False)
+
+        le_state = self._extract_label_encoder_state()
+        with open(path / "label_encoder.json", 'w', encoding='utf-8') as f:
+            json.dump(le_state, f, indent=2, ensure_ascii=False)
+
+        config = {
+            "min_samples_per_genre": self.min_samples_per_genre,
+            "is_fitted": self._is_fitted,
+            "version": 2
         }
-        joblib.dump(state, path)
+        with open(path / "config.json", 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+
         logger.info("Preprocessor saved to: %s", path)
 
-    def load(self, path: Path) -> None:
+    def load(self, path: Union[Path, str]) -> None:
         """
-        Restore a previously saved preprocessor state.
+        Restore a previously saved preprocessor state from JSON files.
 
-        Loads the LabelEncoder, StandardScaler, and configuration from
-        a joblib archive created by save().
+        Expects a directory containing:
+        - scaler.json
+        - label_encoder.json
+        - config.json
 
         Args:
-            path: File path to the saved preprocessor archive.
+            path: Directory path containing the JSON files.
 
         Raises:
-            FileNotFoundError: If the file does not exist.
+            FileNotFoundError: If the directory does not exist.
+            FileNotFoundError: If required JSON files are missing.
         """
         path = Path(path)
+
         if not path.exists():
-            raise FileNotFoundError(f"Preprocessor file not found: {path}")
+            raise FileNotFoundError(f"Preprocessor directory not found: {path}")
 
-        data = joblib.load(path)
-        self.label_encoder = data['label_encoder']
-        self.scaler = data['scaler']
-        self.min_samples_per_genre = data['min_samples_per_genre']
-        self._is_fitted = True
+        # Load scaler (optional, may not exist for pre-fitted state)
+        scaler_path = path / "scaler.json"
+        if scaler_path.exists():
+            with open(scaler_path, 'r', encoding='utf-8') as f:
+                scaler_state = json.load(f)
+            self._restore_scaler(scaler_state)
 
-        logger.info(
-            "Preprocessor loaded from: %s (%d classes, %s)",
-            path,
-            len(self.label_encoder.classes_),
-            "fitted" if self._is_fitted else "not fitted"
-        )
+        # Load label encoder (optional)
+        le_path = path / "label_encoder.json"
+        if le_path.exists():
+            with open(le_path, 'r', encoding='utf-8') as f:
+                le_state = json.load(f)
+            self._restore_label_encoder(le_state)
+
+        # Load config
+        config_path = path / "config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+
+        self.min_samples_per_genre = config.get("min_samples_per_genre", 100)
+        self._is_fitted = config.get("is_fitted", True)
+
+        n_classes = len(self.label_encoder.classes_) if hasattr(self.label_encoder, 'classes_') else 0
+        logger.info("Preprocessor loaded from: %s (%d classes, fitted=%s)", path, n_classes, self._is_fitted)
 
     @property
     def is_fitted(self) -> bool:
@@ -338,16 +355,13 @@ class DataPreprocessor:
         List of genre class names in encoding order.
 
         Returns:
-            List of genre name strings, where index corresponds to encoded label.
+            List of genre name strings, index corresponds to encoded label.
 
         Raises:
             RuntimeError: If the label encoder has not been fitted yet.
         """
         if not self._is_fitted:
-            raise RuntimeError(
-                "LabelEncoder has not been fitted yet. "
-                "Call encode_labels() first."
-            )
+            raise RuntimeError("LabelEncoder has not been fitted yet. Call encode_labels() first.")
         return list(self.label_encoder.classes_)
 
     @property
@@ -355,17 +369,11 @@ class DataPreprocessor:
         """
         Number of unique classes after label encoding.
 
-        Returns:
-            Integer count of classes.
-
         Raises:
             RuntimeError: If the label encoder has not been fitted yet.
         """
         if not self._is_fitted:
-            raise RuntimeError(
-                "LabelEncoder has not been fitted yet. "
-                "Call encode_labels() first."
-            )
+            raise RuntimeError("LabelEncoder has not been fitted yet. Call encode_labels() first.")
         return len(self.label_encoder.classes_)
 
     @property
@@ -373,26 +381,15 @@ class DataPreprocessor:
         """
         Number of features the scaler was fitted on.
 
-        Returns:
-            Integer count of features.
-
         Raises:
             RuntimeError: If the scaler has not been fitted yet.
         """
         if not self._is_fitted:
-            raise RuntimeError(
-                "StandardScaler has not been fitted yet. "
-                "Call normalize_features() first."
-            )
+            raise RuntimeError("StandardScaler has not been fitted yet. Call normalize_features() first.")
         return self.scaler.n_features_in_
 
     def print_info(self) -> None:
-        """
-        Print a human-readable summary of the preprocessor state.
-
-        This is a manual debugging/exploration utility. Shows
-        configuration, fit status, and learned statistics if available.
-        """
+        """Print a human-readable summary of the preprocessor state."""
         print("=" * 50)
         print("DataPreprocessor Info")
         print("=" * 50)
@@ -403,7 +400,9 @@ class DataPreprocessor:
             print(f"Classes: {self.n_classes}")
             print(f"Features: {self.n_features}")
             print("\nClass mapping:")
-            for i, name in enumerate(self.label_encoder.classes_):
+            for i, name in enumerate(self.label_encoder.classes_[:10]):
                 print(f"  {i}: {name}")
+            if self.n_classes > 10:
+                print(f"  ... and {self.n_classes - 10} more")
         else:
             print("Not yet fitted — call encode_labels() and normalize_features()")

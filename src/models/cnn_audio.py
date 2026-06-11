@@ -15,22 +15,31 @@ Design updates (v3):
 - Reduced default dropout (0.3/0.2) for imbalanced datasets
 - Adaptive architecture for variable input lengths
 
+Stacking support (v4):
+- Added predict_proba() method for ensemble probabilities
+- Added export_to_onnx() for production deployment
+
 Typical usage:
     from src.models.cnn_audio import AudioCNN
 
     model = AudioCNN(n_mfcc=40, n_channels=3, n_classes=16, target_frames=430)
     output = model(mfcc_batch)  # (B, 3, 40, 430) -> (B, 16)
 
-    model.save(Path("checkpoints/best_model.pt"))
-    model = AudioCNN.load(Path("checkpoints/best_model.pt"))
+    # For stacking ensemble
+    probabilities = model.predict_proba(mfcc_batch)  # (B, n_classes)
+
+    model.save(Path("checkpoints/cnn_model.pt"))
+    model = AudioCNN.load(Path("checkpoints/cnn_model.pt"))
 """
 
+import json
 import logging
 from pathlib import Path
 from typing import Optional
 
 import torch
 import torch.nn as nn
+import numpy as np
 
 
 logger = logging.getLogger(__name__)
@@ -43,18 +52,18 @@ class AudioCNN(nn.Module):
     Architecture:
         Input:  (B, n_channels, n_mfcc, time_frames)
 
-        Block 1: Conv2d(n_channels, 64, 5×5) → BN → ReLU → MaxPool2d(2)
-        Block 2: Conv2d(64, 128, 5×5) → BN → ReLU → MaxPool2d(2)
-        Block 3: Conv2d(128, 256, 3×3) → BN → ReLU → MaxPool2d(2)
-        Block 4: Conv2d(256, 512, 3×3) → BN → ReLU
-        Block 5: Conv2d(512, 1024, 3×3) → BN → ReLU → AdaptiveAvgPool2d((1, None))
+        Block 1: Conv2d(n_channels, 64, 5x5) → BN → ReLU → MaxPool2d(2)
+        Block 2: Conv2d(64, 128, 5x5) → BN → ReLU → MaxPool2d(2)
+        Block 3: Conv2d(128, 256, 3x3) → BN → ReLU → MaxPool2d(2)
+        Block 4: Conv2d(256, 512, 3x3) → BN → ReLU
+        Block 5: Conv2d(512, 1024, 3x3) → BN → ReLU → AdaptiveAvgPool2d((1, None))
 
         Classifier:
             Adaptive pooling → Flatten → Dropout → FC(?, 512) → ReLU
             → Dropout → FC(512, 256) → ReLU → Dropout → FC(256, n_classes)
 
     Attributes:
-        n_mfcc: Number of MFCC coefficient bands (frequency axis height).
+        n_mfcc: Number of MFCC coefficient bands.
         n_channels: Number of input channels (1 for raw, 3 with deltas).
         n_classes: Number of output genre classes.
         dropout_rate: Dropout probability after convolutional stem.
@@ -71,18 +80,6 @@ class AudioCNN(nn.Module):
         fc_dropout: float = 0.2,
         target_frames: int = 430,
     ) -> None:
-        """
-        Initialize AudioCNN.
-
-        Args:
-            n_mfcc: Number of MFCC coefficient bands (default: 40).
-            n_channels: Number of input channels (1 for base MFCC,
-                        3 for MFCC + delta + delta-delta).
-            n_classes: Number of genre classes for the output layer.
-            dropout: Dropout probability after the convolutional stem (default: 0.3).
-            fc_dropout: Dropout probability between FC layers (default: 0.2).
-            target_frames: Expected number of time frames in input (default: 430 ≈ 10s).
-        """
         super().__init__()
 
         self.n_mfcc = n_mfcc
@@ -95,14 +92,8 @@ class AudioCNN(nn.Module):
         self.conv_block1 = self._make_conv_block(
             n_channels, 64, kernel_size=5, pool_size=2
         )
-
-        self.conv_block2 = self._make_conv_block(
-            64, 128, kernel_size=5, pool_size=2
-        )
-
-        self.conv_block3 = self._make_conv_block(
-            128, 256, kernel_size=3, pool_size=2
-        )
+        self.conv_block2 = self._make_conv_block(64, 128, kernel_size=5, pool_size=2)
+        self.conv_block3 = self._make_conv_block(128, 256, kernel_size=3, pool_size=2)
 
         self.conv_block4 = nn.Sequential(
             nn.Conv2d(256, 512, kernel_size=3, padding=1),
@@ -135,15 +126,10 @@ class AudioCNN(nn.Module):
 
         total_params = self.get_num_parameters()
         logger.info(
-            "AudioCNN v3 initialized — input=(B,%d,%d,%d), "
-            "classes=%d, dropout=%.2f/%.2f, params=%d",
-            n_channels,
-            n_mfcc,
-            target_frames,
-            n_classes,
-            dropout,
-            fc_dropout,
-            total_params,
+            "AudioCNN v4 initialized — input=(B,%d,%d,%d), classes=%d, "
+            "dropout=%.2f/%.2f, params=%d",
+            n_channels, n_mfcc, target_frames, n_classes,
+            dropout, fc_dropout, total_params
         )
 
     @staticmethod
@@ -153,23 +139,7 @@ class AudioCNN(nn.Module):
         kernel_size: int = 3,
         pool_size: int = 2,
     ) -> nn.Sequential:
-        """
-        Build a convolutional block with batch norm, ReLU, and max pooling.
-
-        Conv2d(kernel_size, padding=kernel_size//2) → BatchNorm2d → ReLU
-        → MaxPool2d(pool_size).
-
-        Args:
-            in_channels: Number of input channels.
-            out_channels: Number of output channels.
-            kernel_size: Size of the convolutional kernel.
-            pool_size: Size of the max pooling window.
-
-        Returns:
-            Sequential container with the conv block.
-        """
         padding = kernel_size // 2
-
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding),
             nn.BatchNorm2d(out_channels),
@@ -178,17 +148,7 @@ class AudioCNN(nn.Module):
         )
 
     def _compute_classifier_input_size(self, target_frames: int) -> None:
-        """
-        Compute the flattened feature size after convolutional layers.
-
-        Uses a dummy forward pass with the actual target_frames to determine
-        the input size for the classifier head.
-
-        Args:
-            target_frames: Number of time frames expected in the input.
-        """
         dummy_input = torch.zeros(1, self.n_channels, self.n_mfcc, target_frames)
-
         with torch.no_grad():
             x = self.conv_block1(dummy_input)
             x = self.conv_block2(x)
@@ -196,17 +156,9 @@ class AudioCNN(nn.Module):
             x = self.conv_block4(x)
             x = self.conv_block5(x)
             x = self.freq_pool(x)
-
         self._fc_input_size = x.view(1, -1).size(1)
 
-        logger.debug(
-            "Classifier input size computed: %d (input frames=%d, after 5 blocks + pooling)",
-            self._fc_input_size,
-            target_frames,
-        )
-
     def _initialize_weights(self) -> None:
-        """Apply Kaiming initialization to convolutional and linear layers."""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
@@ -220,17 +172,10 @@ class AudioCNN(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
     def set_dropout(self, dropout: float, fc_dropout: float) -> None:
-        """
-        Change dropout rates on-the-fly for progressive training.
-
-        Args:
-            dropout: New dropout rate after convolutional stem.
-            fc_dropout: New dropout rate between FC layers.
-        """
+        """Change dropout rates on-the-fly for progressive training."""
         self.dropout_rate = dropout
         self.fc_dropout_rate = fc_dropout
 
-        # Update Dropout layers in classifier
         dropout_layers = [m for m in self.classifier if isinstance(m, nn.Dropout)]
         if len(dropout_layers) >= 1:
             dropout_layers[0].p = dropout
@@ -240,36 +185,11 @@ class AudioCNN(nn.Module):
             dropout_layers[2].p = fc_dropout
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass with proper 2D spectrogram processing.
-
-        Args:
-            x: Input tensor. Expected shape:
-               - 4D: (B, n_channels, n_mfcc, time_frames) [preferred]
-               - 3D: (B, n_mfcc, time_frames) - channel dimension auto-inserted
-               - 2D: (n_mfcc, time_frames) - batch and channel auto-inserted
-
-        Returns:
-            Logits tensor of shape (B, n_classes).
-        """
+        """Forward pass returning logits."""
         if x.dim() == 2:
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 3:
             x = x.unsqueeze(1)
-
-        if x.size(1) != self.n_channels:
-            logger.warning(
-                "Input channels mismatch: expected %d, got %d",
-                self.n_channels,
-                x.size(1),
-            )
-
-        if x.size(2) != self.n_mfcc:
-            logger.warning(
-                "Input MFCC bands mismatch: expected %d, got %d",
-                self.n_mfcc,
-                x.size(2),
-            )
 
         x = self.conv_block1(x)
         x = self.conv_block2(x)
@@ -279,25 +199,120 @@ class AudioCNN(nn.Module):
         x = self.freq_pool(x)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
-
         return x
 
-    def get_num_parameters(self) -> int:
+    @torch.no_grad()
+    def predict_proba(self, x: torch.Tensor) -> np.ndarray:
         """
-        Count the total number of trainable parameters.
+        Return class probabilities for stacking ensemble.
+
+        Args:
+            x: Input tensor. Can be 2D, 3D, or 4D.
 
         Returns:
-            Integer parameter count.
+            numpy array of shape (B, n_classes) with softmax probabilities.
         """
+        self.eval()
+
+        if x.dim() == 2:
+            x = x.unsqueeze(0).unsqueeze(0)
+        elif x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        logits = self.forward(x)
+        proba = torch.softmax(logits, dim=1)
+        return proba.cpu().numpy()
+
+    @torch.no_grad()
+    def predict_logits(self, x: torch.Tensor) -> np.ndarray:
+        """
+        Return raw logits (before softmax).
+
+        Args:
+            x: Input tensor.
+
+        Returns:
+            numpy array of shape (B, n_classes) with logits.
+        """
+        self.eval()
+
+        if x.dim() == 2:
+            x = x.unsqueeze(0).unsqueeze(0)
+        elif x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        return self.forward(x).cpu().numpy()
+
+    @torch.no_grad()
+    def get_embeddings(self, x: torch.Tensor) -> np.ndarray:
+        """
+        Extract embeddings before the final classifier layer.
+
+        Useful for hierarchical ensemble approaches.
+
+        Args:
+            x: Input tensor.
+
+        Returns:
+            numpy array of shape (B, embedding_dim) where embedding_dim is 1024.
+        """
+        self.eval()
+
+        if x.dim() == 2:
+            x = x.unsqueeze(0).unsqueeze(0)
+        elif x.dim() == 3:
+            x = x.unsqueeze(1)
+
+        x = self.conv_block1(x)
+        x = self.conv_block2(x)
+        x = self.conv_block3(x)
+        x = self.conv_block4(x)
+        x = self.conv_block5(x)
+        x = self.freq_pool(x)
+        x = x.view(x.size(0), -1)
+
+        return x.cpu().numpy()
+
+    def export_to_onnx(
+        self,
+        save_path: Path,
+        dummy_input_shape: tuple = (1, 3, 40, 430),
+        opset_version: int = 14
+    ) -> None:
+        """
+        Export model to ONNX format for production inference.
+
+        Args:
+            save_path: Path to save the .onnx file.
+            dummy_input_shape: Shape for tracing (batch, channels, mfcc, frames).
+            opset_version: ONNX opset version (default 14).
+        """
+        self.eval()
+        dummy_input = torch.randn(dummy_input_shape)
+
+        torch.onnx.export(
+            self,
+            dummy_input,
+            save_path,
+            input_names=['mfcc_input'],
+            output_names=['logits', 'proba'],
+            dynamic_axes={
+                'mfcc_input': {0: 'batch_size'},
+                'logits': {0: 'batch_size'},
+                'proba': {0: 'batch_size'}
+            },
+            opset_version=opset_version,
+            do_constant_folding=True,
+            verbose=False
+        )
+        logger.info(f"CNN exported to ONNX: {save_path}")
+
+    def get_num_parameters(self) -> int:
+        """Return total number of trainable parameters."""
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     def save(self, path: Path) -> None:
-        """
-        Save model state and configuration to a checkpoint file.
-
-        Args:
-            path: File path for the saved checkpoint (.pt extension recommended).
-        """
+        """Save model state and configuration to a checkpoint file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -314,25 +329,8 @@ class AudioCNN(nn.Module):
         logger.info("AudioCNN saved: %s (params=%d)", path, self.get_num_parameters())
 
     @classmethod
-    def load(
-        cls,
-        path: Path,
-        device: Optional[str] = None,
-    ) -> "AudioCNN":
-        """
-        Load model from a checkpoint file.
-
-        Args:
-            path: Path to the saved checkpoint.
-            device: Device to load the model onto ('cpu', 'cuda', etc.).
-                    Defaults to 'cpu' if None.
-
-        Returns:
-            AudioCNN instance with restored weights and configuration.
-
-        Raises:
-            FileNotFoundError: If the checkpoint file does not exist.
-        """
+    def load(cls, path: Path, device: Optional[str] = None) -> "AudioCNN":
+        """Load model from a checkpoint file."""
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint not found: {path}")
@@ -342,32 +340,21 @@ class AudioCNN(nn.Module):
 
         checkpoint = torch.load(path, map_location=device, weights_only=False)
 
-        n_mfcc = checkpoint.get("n_mfcc", 40)
-        n_channels = checkpoint.get("n_channels", 3)
-        n_classes = checkpoint.get("n_classes", 16)
-        dropout = checkpoint.get("dropout", 0.3)
-        fc_dropout = checkpoint.get("fc_dropout", 0.2)
-        target_frames = checkpoint.get("target_frames", 430)
-
         model = cls(
-            n_mfcc=n_mfcc,
-            n_channels=n_channels,
-            n_classes=n_classes,
-            dropout=dropout,
-            fc_dropout=fc_dropout,
-            target_frames=target_frames,
+            n_mfcc=checkpoint.get("n_mfcc", 40),
+            n_channels=checkpoint.get("n_channels", 3),
+            n_classes=checkpoint.get("n_classes", 16),
+            dropout=checkpoint.get("dropout", 0.3),
+            fc_dropout=checkpoint.get("fc_dropout", 0.2),
+            target_frames=checkpoint.get("target_frames", 430),
         )
         model.load_state_dict(checkpoint["state_dict"])
         model.to(device)
 
         logger.info(
             "AudioCNN loaded: %s (channels=%d, mfcc=%d, classes=%d, frames=%d) → %s",
-            path.name,
-            n_channels,
-            n_mfcc,
-            n_classes,
-            target_frames,
-            device,
+            path.name, model.n_channels, model.n_mfcc,
+            model.n_classes, model.target_frames, device
         )
 
         return model
@@ -375,7 +362,7 @@ class AudioCNN(nn.Module):
     def print_info(self) -> None:
         """Print a human-readable summary of the model architecture."""
         print("=" * 70)
-        print("AudioCNN v3 — 2D CNN for MFCC Spectrograms")
+        print("AudioCNN v4 — 2D CNN for MFCC Spectrograms with Stacking Support")
         print("=" * 70)
         print(f"Input shape:      (B, {self.n_channels}, {self.n_mfcc}, {self.target_frames})")
         print(f"Output classes:   {self.n_classes}")
@@ -383,11 +370,9 @@ class AudioCNN(nn.Module):
         print(f"Parameters:       {self.get_num_parameters():,}")
         print(f"Classifier input: {self._fc_input_size:,}")
         print("")
-        print("Architecture:")
-        print("  Block 1: Conv5x5(→64) + MaxPool2d")
-        print("  Block 2: Conv5x5(64→128) + MaxPool2d")
-        print("  Block 3: Conv3x3(128→256) + MaxPool2d")
-        print("  Block 4: Conv3x3(256→512)")
-        print("  Block 5: Conv3x3(512→1024)")
-        print("  Classifier: 1024*? → 512 → 256 → n_classes")
+        print("Methods for stacking:")
+        print("  - predict_proba()  → probabilities for ensemble")
+        print("  - predict_logits() → raw logits")
+        print("  - get_embeddings() → features before classifier")
+        print("  - export_to_onnx() → production deployment")
         print("=" * 70)

@@ -5,6 +5,11 @@ Provides training with optional class weights, early stopping on validation,
 model persistence with metadata, and a multi-metric evaluation suite including
 Top-k accuracy, confidence analysis, and a composite score for model selection.
 
+Stacking support (v2):
+- Added get_oof_predictions() for Out-of-Fold predictions
+- Added predict_proba_for_stacking() for consistent interface
+- Added get_base_predictions() for ensemble compatibility
+
 Typical usage:
     from src.models.xgboost_model import XGBoostGenreClassifier
 
@@ -16,12 +21,15 @@ Typical usage:
 
     model.save(name="experiment_v1")
     model.load(name="experiment_v1")
+
+    # For stacking ensemble
+    oof_predictions = model.get_oof_predictions(X_train, y_train, n_folds=5)
 """
 
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -52,16 +60,19 @@ class XGBoostGenreClassifier:
     model persistence with metadata, and a comprehensive evaluation
     suite combining multiple metrics into a composite score.
 
+    V2: Uses XGBoost native .json format for model and separate .meta.json.
+    Stacking: Supports Out-of-Fold predictions for ensemble training.
+
     Attributes:
         params: XGBoost hyperparameters dictionary.
         use_class_weights: Whether to compute balanced sample weights.
         model_name: Identifier used for save/load paths.
-        sklearn_model: The underlying XGBClassifier instance (after fit/load).
-        class_weights: Per-class weight mapping (if use_class_weights=True).
+        sklearn_model: The underlying XGBClassifier instance.
+        class_weights: Per-class weight mapping.
         genre_names: Ordered list of genre name strings.
     """
 
-    DEFAULT_MODEL_NAME = "xgboost_auto.json"
+    DEFAULT_MODEL_NAME = "xgboost.json"
 
     def __init__(
         self,
@@ -75,12 +86,11 @@ class XGBoostGenreClassifier:
         Initialize the XGBoost classifier.
 
         Args:
-            config_path: Path to a models.yaml config file.
-                         Defaults to configs/models.yaml.
-            params: XGBoost parameters dict. Overrides config file values.
+            config_path: Path to models.yaml config file.
+            params: XGBoost parameters dict. Overrides config.
             use_class_weights: Compute balanced class weights during training.
             random_state: Random seed for reproducibility.
-            model_name: Filename stem for save/load. Defaults to 'xgboost_auto'.
+            model_name: Filename stem for save/load.
         """
         if config_path is None:
             config_path = project_paths.configs_dir / "models.yaml"
@@ -105,10 +115,8 @@ class XGBoostGenreClassifier:
         self.genre_names: Optional[List[str]] = None
 
         logger.debug(
-            "XGBoostGenreClassifier initialized — model_name=%s, "
-            "use_class_weights=%s",
-            self.model_name,
-            use_class_weights,
+            "XGBoostGenreClassifier initialized — model_name=%s, use_class_weights=%s",
+            self.model_name, use_class_weights
         )
 
     @property
@@ -117,31 +125,14 @@ class XGBoostGenreClassifier:
         return project_paths.xgboost.models_dir
 
     def _get_default_path(self, filename: Optional[str] = None) -> Path:
-        """
-        Resolve the default save path for a model file.
-
-        Args:
-            filename: Base filename. Uses self.model_name if None.
-                      '.json' extension is appended if missing.
-
-        Returns:
-            Absolute Path to the model JSON file.
-        """
+        """Resolve the default save path for a model file."""
         name = filename or self.model_name
         if not name.endswith(".json"):
             name = name + ".json"
         return self._default_save_dir / name
 
     def _get_sample_weights(self, y_train: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Compute per-sample weights for imbalanced classes.
-
-        Args:
-            y_train: Encoded training labels.
-
-        Returns:
-            1D array of sample weights, or None if class weights are disabled.
-        """
+        """Compute per-sample weights for imbalanced classes."""
         if not self.use_class_weights:
             return None
 
@@ -156,9 +147,7 @@ class XGBoostGenreClassifier:
 
         logger.info(
             "Class weights computed — min=%.3f, max=%.3f, ratio=%.1f:1",
-            min_w,
-            max_w,
-            max_w / min_w if min_w > 0 else float("inf"),
+            min_w, max_w, max_w / min_w if min_w > 0 else float("inf")
         )
 
         return sample_weights
@@ -175,11 +164,11 @@ class XGBoostGenreClassifier:
         Train the XGBoost classifier.
 
         Args:
-            X_train: Training feature matrix (n_samples, n_features).
-            y_train: Encoded training labels (n_samples,).
+            X_train: Training feature matrix.
+            y_train: Encoded training labels.
             X_val: Validation feature matrix for early stopping.
             y_val: Validation labels for early stopping.
-            genre_names: Ordered list of genre names. Stored for evaluation.
+            genre_names: Ordered list of genre names.
 
         Returns:
             Self (fitted classifier).
@@ -192,24 +181,19 @@ class XGBoostGenreClassifier:
         logger.info(
             "Training XGBoost — samples=%d, features=%d, classes=%d, "
             "early_stopping=%s, class_weights=%s",
-            len(X_train),
-            X_train.shape[1],
-            num_classes,
-            X_val is not None,
-            self.use_class_weights,
+            len(X_train), X_train.shape[1], num_classes,
+            X_val is not None, self.use_class_weights
         )
         logger.debug("XGBoost params: %s", self.params)
 
         self.sklearn_model = xgb.XGBClassifier(
             **self.params,
-            eval_metric="mlogloss",
         )
 
         eval_set = [(X_val, y_val)] if X_val is not None and y_val is not None else None
 
         self.sklearn_model.fit(
-            X_train,
-            y_train,
+            X_train, y_train,
             sample_weight=sample_weights,
             eval_set=eval_set,
             verbose=False,
@@ -221,50 +205,127 @@ class XGBoostGenreClassifier:
         best_iter = getattr(self.sklearn_model, "best_iteration", None)
         best_score = getattr(self.sklearn_model, "best_score", float("nan"))
 
-        logger.info(
-            "Training complete — best_iteration=%s, best_score=%.4f",
-            best_iter,
-            best_score,
-        )
+        logger.info("Training complete — best_iteration=%s, best_score=%.4f", best_iter, best_score)
 
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict class labels.
-
-        Args:
-            X: Feature matrix.
-
-        Returns:
-            1D array of integer class labels.
-
-        Raises:
-            RuntimeError: If the model has not been fitted.
-        """
+        """Predict class labels."""
         self._check_fitted()
         return self.sklearn_model.predict(X)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """
-        Predict class probabilities.
-
-        Args:
-            X: Feature matrix.
-
-        Returns:
-            2D array of shape (n_samples, n_classes).
-
-        Raises:
-            RuntimeError: If the model has not been fitted.
-        """
+        """Predict class probabilities."""
         self._check_fitted()
         return self.sklearn_model.predict_proba(X)
+
+    def predict_proba_for_stacking(self, X: np.ndarray) -> np.ndarray:
+        """
+        Alias for predict_proba for consistent interface with CNN in stacking ensemble.
+        """
+        return self.predict_proba(X)
 
     def _check_fitted(self) -> None:
         """Raise RuntimeError if the model is not fitted."""
         if not self._is_fitted:
             raise RuntimeError("Model has not been fitted. Call fit() or load() first.")
+
+    def get_oof_predictions(
+        self,
+        X_train: np.ndarray,
+        y_train: np.ndarray,
+        n_folds: int = 5,
+        random_state: int = 42,
+        verbose: bool = True
+    ) -> np.ndarray:
+        """
+        Generate Out-of-Fold (OOF) predictions for stacking ensemble.
+
+        Uses stratified k-fold cross-validation to get unbiased predictions
+        on training data for training the meta-model. This prevents overfitting
+        that would occur if we used the same model's predictions on its own
+        training data.
+
+        Args:
+            X_train: Training feature matrix (n_samples, n_features)
+            y_train: Training labels (n_samples,)
+            n_folds: Number of folds for cross-validation
+            random_state: Random seed for reproducibility
+            verbose: Whether to log progress
+
+        Returns:
+            OOF predictions of shape (n_samples, n_classes) with probabilities
+            from the fold where each sample was in the validation set.
+        """
+        from sklearn.model_selection import StratifiedKFold
+
+        self._check_fitted()
+
+        n_classes = self.params.get('num_class', len(np.unique(y_train)))
+        oof_proba = np.zeros((len(X_train), n_classes))
+
+        kf = StratifiedKFold(
+            n_splits=n_folds,
+            shuffle=True,
+            random_state=random_state
+        )
+
+        if verbose:
+            logger.info(f"Generating OOF predictions with {n_folds} folds...")
+
+        for fold, (train_idx, val_idx) in enumerate(kf.split(X_train, y_train)):
+            # Create fresh model for this fold
+            fold_model = XGBoostGenreClassifier(
+                params=self.params.copy(),
+                use_class_weights=self.use_class_weights,
+                random_state=random_state + fold
+            )
+
+            # Train on fold
+            fold_model.fit(
+                X_train[train_idx], y_train[train_idx],
+                X_val=None, y_val=None,
+                genre_names=self.genre_names
+            )
+
+            # Predict on validation
+            oof_proba[val_idx] = fold_model.predict_proba(X_train[val_idx])
+
+            if verbose:
+                logger.info(f"  Fold {fold + 1}/{n_folds} completed")
+
+        if verbose:
+            logger.info("OOF predictions generated successfully")
+
+        return oof_proba
+
+    def get_base_predictions(
+        self,
+        X: np.ndarray,
+        return_type: str = "proba"
+    ) -> np.ndarray:
+        """
+        Get base predictions for stacking ensemble (compatible with CNN interface).
+
+        Args:
+            X: Feature matrix
+            return_type: One of 'proba', 'logits', or 'predict'
+
+        Returns:
+            Predictions of shape (n_samples, n_classes) for 'proba'/'logits',
+            or (n_samples,) for 'predict'
+        """
+        self._check_fitted()
+
+        if return_type == "proba":
+            return self.predict_proba(X)
+        elif return_type == "logits":
+            # XGBoost doesn't have logits, return probabilities as approximation
+            return self.predict_proba(X)
+        elif return_type == "predict":
+            return self.predict(X)
+        else:
+            raise ValueError(f"Unknown return_type: {return_type}")
 
     def top_k_accuracy(
         self,
@@ -277,14 +338,6 @@ class XGBoostGenreClassifier:
 
         A prediction is correct if the true label is among the top-k
         predicted classes by probability.
-
-        Args:
-            y_true: Ground truth labels.
-            y_pred_proba: Predicted probability matrix.
-            k: Number of top predictions to consider.
-
-        Returns:
-            Top-k accuracy as a float between 0 and 1.
         """
         top_k_preds = np.argsort(y_pred_proba, axis=1)[:, -k:]
         correct = np.mean([y_true[i] in top_k_preds[i] for i in range(len(y_true))])
@@ -298,18 +351,8 @@ class XGBoostGenreClassifier:
         """
         Analyze model confidence on correct vs. incorrect predictions.
 
-        Computes mean and std of max predicted probability for correctly
-        and incorrectly classified samples, plus the confidence gap.
-
-        Args:
-            X_test: Test feature matrix.
-            y_true: Ground truth labels.
-
         Returns:
-            Dictionary with keys: confidence_correct_mean,
-            confidence_correct_std, confidence_wrong_mean,
-            confidence_wrong_std, confidence_gap,
-            low_confidence_count, low_confidence_rate.
+            Dictionary with confidence statistics.
         """
         y_pred_proba = self.predict_proba(X_test)
         y_pred = self.predict(X_test)
@@ -324,14 +367,13 @@ class XGBoostGenreClassifier:
         correct_std = float(correct_conf.std()) if len(correct_conf) > 0 else 0.0
         wrong_mean = float(wrong_conf.mean()) if len(wrong_conf) > 0 else 0.0
         wrong_std = float(wrong_conf.std()) if len(wrong_conf) > 0 else 0.0
-        gap = correct_mean - wrong_mean if len(wrong_conf) > 0 else 0.0
 
         return {
             "confidence_correct_mean": correct_mean,
             "confidence_correct_std": correct_std,
             "confidence_wrong_mean": wrong_mean,
             "confidence_wrong_std": wrong_std,
-            "confidence_gap": gap,
+            "confidence_gap": correct_mean - wrong_mean,
             "low_confidence_count": int(np.sum(max_proba < 0.5)),
             "low_confidence_rate": float(np.mean(max_proba < 0.5)),
         }
@@ -339,18 +381,9 @@ class XGBoostGenreClassifier:
     @staticmethod
     def _compute_composite_score(metrics: Dict[str, Any]) -> float:
         """
-        Compute a weighted composite score for model comparison.
+        Compute weighted composite score for model comparison.
 
-        Weights:
-            - F1-macro: 40% (emphasizes rare genre performance)
-            - Top-3 accuracy: 40% (captures stylistic understanding)
-            - F1-weighted: 20% (overall quality)
-
-        Args:
-            metrics: Dictionary with keys f1_macro, top_3_accuracy, f1_weighted.
-
-        Returns:
-            Composite score between 0 and 1.
+        Weights: F1-macro (40%), Top-3 accuracy (40%), F1-weighted (20%)
         """
         f1_macro = metrics.get("f1_macro", 0.0)
         top_3 = metrics.get("top_3_accuracy", 0.0)
@@ -367,16 +400,6 @@ class XGBoostGenreClassifier:
     ) -> Dict[str, Any]:
         """
         Run a comprehensive evaluation suite.
-
-        Computes accuracy, precision, recall, F1 (weighted/macro/micro),
-        Top-k accuracy for each k, confidence analysis, ROC-AUC,
-        and the composite score.
-
-        Args:
-            X_test: Test feature matrix.
-            y_test: Ground truth labels.
-            genre_names: Genre names for the classification report.
-            k_values: List of k values for Top-k accuracy. Default: [1, 3, 5].
 
         Returns:
             Nested dictionary with all metrics.
@@ -410,14 +433,14 @@ class XGBoostGenreClassifier:
 
         try:
             metrics["roc_auc_ovo"] = float(roc_auc_score(
-                y_test, y_pred_proba, multi_class="ovo", average="weighted",
+                y_test, y_pred_proba, multi_class="ovo", average="weighted"
             ))
         except Exception:
             metrics["roc_auc_ovo"] = None
 
         try:
             metrics["roc_auc_ovr"] = float(roc_auc_score(
-                y_test, y_pred_proba, multi_class="ovr", average="weighted",
+                y_test, y_pred_proba, multi_class="ovr", average="weighted"
             ))
         except Exception:
             metrics["roc_auc_ovr"] = None
@@ -427,10 +450,8 @@ class XGBoostGenreClassifier:
         logger.info(
             "Evaluation complete — accuracy=%.4f, f1_macro=%.4f, "
             "top_3=%.4f, composite=%.4f",
-            metrics["accuracy"],
-            metrics["f1_macro"],
-            metrics.get("top_3_accuracy", 0.0),
-            metrics["composite_score"],
+            metrics["accuracy"], metrics["f1_macro"],
+            metrics.get("top_3_accuracy", 0.0), metrics["composite_score"]
         )
 
         return metrics
@@ -438,15 +459,6 @@ class XGBoostGenreClassifier:
     def get_feature_importance(self, top_n: int = 20) -> pd.DataFrame:
         """
         Return the most important features according to the model.
-
-        Args:
-            top_n: Number of top features to return.
-
-        Returns:
-            DataFrame with columns 'feature' and 'importance', sorted descending.
-
-        Raises:
-            RuntimeError: If the model has not been fitted.
         """
         self._check_fitted()
 
@@ -477,15 +489,8 @@ class XGBoostGenreClassifier:
         """
         Save the trained model and metadata to disk.
 
-        Args:
-            filepath: Exact file path. Takes precedence over name.
-            name: Base filename. Saved to the default model directory.
-
-        Returns:
-            Path to the saved model file.
-
-        Raises:
-            RuntimeError: If the model has not been fitted.
+        Model saved as XGBoost native .json format.
+        Metadata saved as separate .meta.json file.
         """
         self._check_fitted()
 
@@ -514,8 +519,9 @@ class XGBoostGenreClassifier:
             ),
             "is_fitted": self._is_fitted,
             "task": "mono_classification",
-            "description": "Single-label genre classification (main genre only)",
+            "description": "Single-label genre classification",
             "model_name": save_path.stem,
+            "format_version": 2,
         }
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, indent=2, ensure_ascii=False)
@@ -525,69 +531,69 @@ class XGBoostGenreClassifier:
 
         return save_path
 
+    @classmethod
     def load(
-        self,
-        filepath: Optional[Path] = None,
-        name: Optional[str] = None,
+            cls,
+            filepath: Optional[Path] = None,
+            name: Optional[str] = None,
     ) -> "XGBoostGenreClassifier":
         """
         Load a previously saved model and metadata.
 
-        Args:
-            filepath: Exact file path. Takes precedence over name.
-            name: Base filename to load from the default model directory.
-
-        Returns:
-            Self (loaded classifier).
-
-        Raises:
-            FileNotFoundError: If no model file can be found.
+        Expects XGBoost .json model file and companion .meta.json.
         """
+        # Create temporary instance to use helper methods
+        temp_instance = cls()
+
         if filepath is not None:
             load_path = Path(filepath)
         elif name is not None:
-            load_path = self._get_default_path(name)
+            load_path = temp_instance._get_default_path(name)
         else:
-            load_path = self._get_default_path()
+            load_path = temp_instance._get_default_path()
 
         if not load_path.exists():
-            load_path = self._resolve_missing_path(load_path)
+            load_path = temp_instance._resolve_missing_path(load_path)
 
-        self.sklearn_model = xgb.XGBClassifier()
-        self.sklearn_model.load_model(str(load_path))
-        self.model = self.sklearn_model.get_booster()
+        sklearn_model = xgb.XGBClassifier()
+        sklearn_model.load_model(str(load_path))
+        model = sklearn_model.get_booster()
 
         meta_path = load_path.with_suffix(".meta.json")
+        params = {}
+        use_class_weights = True
+        genre_names = None
+        class_weights = None
+        model_name = load_path.stem
+
         if meta_path.exists():
             with open(meta_path, "r", encoding="utf-8") as f:
                 meta = json.load(f)
-            self.params = meta.get("params", {})
-            self.use_class_weights = meta.get("use_class_weights", True)
-            self.genre_names = meta.get("genre_names")
-            self.class_weights = meta.get("class_weights")
-            self.model_name = meta.get("model_name", load_path.stem)
+            params = meta.get("params", {})
+            use_class_weights = meta.get("use_class_weights", True)
+            genre_names = meta.get("genre_names")
+            class_weights = meta.get("class_weights")
+            model_name = meta.get("model_name", load_path.stem)
 
-        self._is_fitted = True
+        # Create instance with loaded parameters
+        instance = cls(
+            params=params,
+            use_class_weights=use_class_weights,
+            model_name=model_name
+        )
+        instance.sklearn_model = sklearn_model
+        instance.model = model
+        instance.genre_names = genre_names
+        instance.class_weights = class_weights
+        instance._is_fitted = True
 
         logger.info("Model loaded: %s", load_path)
 
-        return self
+        return instance
 
     def _resolve_missing_path(self, load_path: Path) -> Path:
         """
         Attempt to find a model file when the exact path is missing.
-
-        Tries the path without extension, then falls back to the first
-        .json file in the default model directory.
-
-        Args:
-            load_path: The path that was not found.
-
-        Returns:
-            A resolved Path that exists.
-
-        Raises:
-            FileNotFoundError: If no model file could be found.
         """
         alt_path = load_path.with_suffix("")
         if alt_path.exists():
@@ -600,35 +606,24 @@ class XGBoostGenreClassifier:
                 fallback = candidates[0]
                 logger.warning(
                     "Model not found at %s — loading most recent: %s",
-                    load_path,
-                    fallback.name,
+                    load_path, fallback.name
                 )
                 return fallback
 
-        available = (
-            [f.name for f in models_dir.glob("*.json")]
-            if models_dir.exists()
-            else []
-        )
+        available = [f.name for f in models_dir.glob("*.json")] if models_dir.exists() else []
         raise FileNotFoundError(
-            f"Model not found.\n"
-            f"Searched: {load_path}\n"
-            f"Directory: {models_dir}\n"
-            f"Available: {available if available else 'none'}"
+            f"Model not found.\nSearched: {load_path}\n"
+            f"Directory: {models_dir}\nAvailable: {available if available else 'none'}"
         )
 
     def print_info(self) -> None:
-        """
-        Print a human-readable summary of the model state.
-
-        This is a manual debugging/exploration utility.
-        """
+        """Print a human-readable summary of the model state."""
         if not self._is_fitted:
             print("Model has not been fitted yet.")
             return
 
         print("=" * 60)
-        print("XGBOOST CLASSIFIER SUMMARY")
+        print("XGBOOST CLASSIFIER SUMMARY (with Stacking Support)")
         print("=" * 60)
         print(f"Model name:      {self.model_name}")
         print(f"Classes:         {self.params.get('num_class', '?')}")
@@ -640,4 +635,9 @@ class XGBoostGenreClassifier:
             min_w = min(self.class_weights.values())
             max_w = max(self.class_weights.values())
             print(f"Weight range:    {min_w:.3f} – {max_w:.3f}")
+        print("-" * 60)
+        print("Stacking methods:")
+        print("  - get_oof_predictions()      → Out-of-Fold predictions")
+        print("  - predict_proba_for_stacking() → alias for predict_proba")
+        print("  - get_base_predictions()     → unified interface")
         print("=" * 60)

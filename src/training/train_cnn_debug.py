@@ -300,7 +300,7 @@ def debug_train(
         improved = val_acc > best_val_acc
         if improved:
             best_val_acc = val_acc
-            torch.save(model.state_dict(), save_dir / "best_model.pt")
+            torch.save(model.state_dict(), save_dir / "cnn_model.pt")
 
         status = "⭐" if improved else "  "
         logger.info(
@@ -316,7 +316,7 @@ def debug_train(
         )
 
     logger.info("Evaluating on test set...")
-    model.load_state_dict(torch.load(save_dir / "best_model.pt", weights_only=True))
+    model.load_state_dict(torch.load(save_dir / "cnn_model.pt", weights_only=True))
     test_loss, test_acc = validate(model, test_loader, criterion, device)
 
     per_class_acc = compute_per_class_accuracy(

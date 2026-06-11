@@ -1,14 +1,19 @@
 """
-Fast loading of preprocessed data from cache.
+Fast loading of preprocessed data from cache (V2).
 
 Provides convenient access to datasets that have already been prepared
 by the DataPipeline. Supports multiple dataset configurations identified
 by subset and minimum samples per genre.
 
+V2 Changes:
+- Reads new directory structure with features/, labels/, indices/
+- Loads preprocessor from JSON (not joblib)
+- No legacy pickle/joblib support
+
 Typical usage:
     from src.data.load_processed import load_data
 
-    data = load_data()  # Uses default config (medium, 100)
+    data = load_data()  # Uses default config (medium, 10)
     X_train, y_train = data['X_train'], data['y_train']
 
     # List available cached datasets
@@ -19,13 +24,13 @@ Typical usage:
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import joblib
 import numpy as np
 import pandas as pd
 
 from src.utils.config import paths
+from src.data.preprocessor import DataPreprocessor
 
 
 logger = logging.getLogger(__name__)
@@ -33,18 +38,37 @@ logger = logging.getLogger(__name__)
 
 class LoadProcessedData:
     """
-    Fast accessor for preprocessed and cached FMA datasets.
+    Fast accessor for preprocessed and cached FMA datasets (V2 format).
 
-    Loads feature arrays, labels, metadata, preprocessor state,
-    and track indices from the disk cache populated by DataPipeline.
-    Supports discovery of multiple cached dataset configurations.
+    Loads feature arrays from .npy files in features/ directory,
+    labels from labels/ directory, indices from JSON files,
+    and preprocessor from JSON directory structure.
+
+    Directory structure expected:
+        data_dir/
+        ├── features/
+        │   ├── X_train.npy
+        │   ├── X_val.npy
+        │   └── X_test.npy
+        ├── labels/
+        │   ├── y_train.npy
+        │   ├── y_val.npy
+        │   └── y_test.npy
+        ├── indices/
+        │   ├── train.json
+        │   ├── val.json
+        │   └── test.json
+        ├── preprocessor/
+        │   ├── scaler.json
+        │   ├── label_encoder.json
+        │   └── config.json
+        └── metadata.json
 
     Attributes:
         dataset_id: Unique identifier string for the dataset configuration.
         subset: FMA subset name ('small', 'medium', 'large').
         min_samples_per_genre: Minimum track count per genre used.
         data_dir: Path to the cached data directory.
-        processors_dir: Path to the cached preprocessor directory.
     """
 
     def __init__(
@@ -56,14 +80,10 @@ class LoadProcessedData:
         """
         Initialize the data loader for a specific dataset configuration.
 
-        The dataset can be specified either by explicit subset/min_samples
-        or by a precomputed dataset_id. If dataset_id is provided, subset
-        and min_samples are extracted from it (best effort).
-
         Args:
             subset: FMA subset name. If None, uses configured default.
-            min_samples_per_genre: Minimum tracks per genre. If None, uses 100.
-            dataset_id: Full dataset identifier string (e.g., 'medium_100').
+            min_samples_per_genre: Minimum tracks per genre. If None, uses 10.
+            dataset_id: Full dataset identifier (e.g., 'medium_10').
                         Overrides subset and min_samples_per_genre if provided.
         """
         if dataset_id is not None:
@@ -74,94 +94,104 @@ class LoadProcessedData:
                 try:
                     self.min_samples_per_genre = int(parts[1])
                 except ValueError:
-                    self.min_samples_per_genre = 100
+                    self.min_samples_per_genre = 10
             else:
                 self.subset = subset or paths.active_subset
-                self.min_samples_per_genre = min_samples_per_genre or 100
+                self.min_samples_per_genre = min_samples_per_genre or 10
         else:
             self.subset = subset or paths.active_subset
-            self.min_samples_per_genre = min_samples_per_genre or 100
+            self.min_samples_per_genre = min_samples_per_genre or 10
             self.dataset_id = f"{self.subset}_{self.min_samples_per_genre}"
 
         self.data_dir = paths.fma_features_dataset_dir / self.dataset_id
-        self.processors_dir = paths.processors_data_dir / "fma"
-
         self._data: Optional[Dict[str, Any]] = None
+        self._indices_cache: Dict[str, Dict[int, int]] = {}
 
         logger.debug(
             "LoadProcessedData initialized — dataset_id=%s, data_dir=%s",
-            self.dataset_id,
-            self.data_dir,
+            self.dataset_id, self.data_dir
         )
 
-    def _get_cache_file(self) -> Path:
-        """Path to the full pipeline pickle cache file."""
-        return self.processors_dir / f"pipeline_{self.dataset_id}.pkl"
+    def _get_features_path(self, split: str) -> Path:
+        """Path to features .npy file for given split."""
+        return self.data_dir / "features" / f"X_{split}.npy"
+
+    def _get_labels_path(self, split: str) -> Path:
+        """Path to labels .npy file for given split."""
+        return self.data_dir / "labels" / f"y_{split}.npy"
+
+    def _get_indices_path(self, split: str) -> Path:
+        """Path to indices JSON file for given split."""
+        return self.data_dir / "indices" / f"{split}.json"
 
     def _get_metadata_path(self) -> Path:
         """Path to the dataset metadata JSON file."""
         return self.data_dir / "metadata.json"
 
+    def _get_preprocessor_dir(self) -> Path:
+        """Path to preprocessor directory."""
+        return self.data_dir / "preprocessor"
+
     def exists(self) -> bool:
         """
-        Check whether cached data exists for this dataset configuration.
+        Check whether cached data exists for this dataset configuration (V2 format).
 
         Returns:
             True if the cache directory contains all required files.
         """
-        has_files = (
-            self._get_cache_file().exists()
-            and self._get_metadata_path().exists()
-            and (self.data_dir / "X_train.npy").exists()
-        )
+        required = [
+            self._get_features_path("train"),
+            self._get_labels_path("train"),
+            self._get_metadata_path(),
+            self._get_preprocessor_dir().exists(),
+        ]
+        has_files = all(required)
         if not has_files:
-            logger.debug("Cache not found for dataset '%s'", self.dataset_id)
+            logger.debug("V2 cache not found for dataset '%s'", self.dataset_id)
         return has_files
 
     def list_available_datasets(self) -> List[str]:
         """
-        Discover all cached dataset configurations on disk.
+        Discover all cached dataset configurations on disk (V2 format).
 
-        Scans the FMA features dataset directory for subdirectories
-        containing a valid metadata.json file.
+        Scans for subdirectories containing a valid metadata.json file
+        and the V2 directory structure.
 
         Returns:
             Sorted list of dataset_id strings.
         """
         if not paths.fma_features_dataset_dir.exists():
-            logger.debug(
-                "Dataset directory not found: %s",
-                paths.fma_features_dataset_dir,
-            )
+            logger.debug("Dataset directory not found: %s", paths.fma_features_dataset_dir)
             return []
 
-        datasets = sorted([
-            d.name
-            for d in paths.fma_features_dataset_dir.iterdir()
-            if d.is_dir() and (d / "metadata.json").exists()
-        ])
+        datasets = []
+        for d in paths.fma_features_dataset_dir.iterdir():
+            if not d.is_dir():
+                continue
+            # Check for V2 structure
+            if (d / "metadata.json").exists() and (d / "features").exists():
+                datasets.append(d.name)
 
         logger.debug("Found %d cached dataset(s): %s", len(datasets), datasets)
-        return datasets
+        return sorted(datasets)
 
     def load(self, force_reload: bool = False) -> Dict[str, Any]:
         """
-        Load preprocessed data from the disk cache.
+        Load preprocessed data from the disk cache (V2 format).
 
-        Reads .npy arrays for features and labels, JSON metadata,
-        joblib preprocessor state, and optional track indices.
+        Reads .npy arrays for features and labels, JSON for indices,
+        and JSON-based preprocessor.
 
         Args:
-            force_reload: If True, bypasses the in-memory cache and
-                          re-reads from disk.
+            force_reload: If True, bypasses the in-memory cache.
 
         Returns:
             Data dictionary with keys:
             - X_train, X_val, X_test: normalized feature arrays
             - y_train, y_val, y_test: encoded label arrays
             - train_indices, val_indices, test_indices: track ID arrays
-            - label_encoder: fitted LabelEncoder (if available)
-            - scaler: fitted StandardScaler (if available)
+            - label_encoder: fitted LabelEncoder
+            - scaler: fitted StandardScaler
             - genre_names: list of genre name strings
             - metadata: full dataset metadata dictionary
             - dataset_id: the dataset identifier string
@@ -181,38 +211,33 @@ class LoadProcessedData:
             logger.debug("Returning in-memory cached data [%s]", self.dataset_id)
             return self._data
 
-        logger.info("Loading cached data [%s] from: %s", self.dataset_id, self.data_dir)
+        logger.info("Loading cached data (V2) [%s] from: %s", self.dataset_id, self.data_dir)
 
-        X_train = np.load(self.data_dir / "X_train.npy")
-        X_val = np.load(self.data_dir / "X_val.npy")
-        X_test = np.load(self.data_dir / "X_test.npy")
-        y_train = np.load(self.data_dir / "y_train.npy")
-        y_val = np.load(self.data_dir / "y_val.npy")
-        y_test = np.load(self.data_dir / "y_test.npy")
+        # Load features
+        X_train = np.load(self._get_features_path("train"))
+        X_val = np.load(self._get_features_path("val"))
+        X_test = np.load(self._get_features_path("test"))
 
-        train_indices_path = self.data_dir / "train_indices.npy"
-        if train_indices_path.exists():
-            train_indices = np.load(train_indices_path)
-            val_indices = np.load(self.data_dir / "val_indices.npy")
-            test_indices = np.load(self.data_dir / "test_indices.npy")
-        else:
-            train_indices = None
-            val_indices = None
-            test_indices = None
-            logger.debug("Track indices not found in cache")
+        # Load labels
+        y_train = np.load(self._get_labels_path("train"))
+        y_val = np.load(self._get_labels_path("val"))
+        y_test = np.load(self._get_labels_path("test"))
 
+        # Load indices from JSON
+        with open(self._get_indices_path("train"), "r") as f:
+            train_indices = np.array(json.load(f))
+        with open(self._get_indices_path("val"), "r") as f:
+            val_indices = np.array(json.load(f))
+        with open(self._get_indices_path("test"), "r") as f:
+            test_indices = np.array(json.load(f))
+
+        # Load metadata
         with open(self._get_metadata_path(), "r") as f:
             metadata = json.load(f)
 
-        label_encoder = None
-        scaler = None
-        preprocessor_path = self.processors_dir / f"preprocessor_{self.dataset_id}.pkl"
-        if preprocessor_path.exists():
-            preprocessor_state = joblib.load(preprocessor_path)
-            label_encoder = preprocessor_state["label_encoder"]
-            scaler = preprocessor_state["scaler"]
-        else:
-            logger.warning("Preprocessor file not found: %s", preprocessor_path)
+        # Load preprocessor from JSON directory
+        preprocessor = DataPreprocessor()
+        preprocessor.load(self._get_preprocessor_dir())
 
         self._data = {
             "X_train": X_train,
@@ -224,8 +249,8 @@ class LoadProcessedData:
             "train_indices": train_indices,
             "val_indices": val_indices,
             "test_indices": test_indices,
-            "label_encoder": label_encoder,
-            "scaler": scaler,
+            "label_encoder": preprocessor.label_encoder,
+            "scaler": preprocessor.scaler,
             "genre_names": metadata.get("class_names", []),
             "metadata": metadata,
             "dataset_id": self.dataset_id,
@@ -234,9 +259,7 @@ class LoadProcessedData:
         logger.info(
             "Loaded dataset [%s]: %d train, %d val, %d test — %d genres, %d features",
             self.dataset_id,
-            len(X_train),
-            len(X_val),
-            len(X_test),
+            len(X_train), len(X_val), len(X_test),
             metadata.get("num_classes", 0),
             metadata.get("num_features", 0),
         )
@@ -249,7 +272,6 @@ class LoadProcessedData:
 
         If feature names are available in metadata, the feature arrays
         are wrapped in DataFrames with the original column labels.
-        Otherwise, raw numpy arrays are returned.
 
         Returns:
             Data dictionary where X_train, X_val, X_test may be
@@ -270,13 +292,129 @@ class LoadProcessedData:
         logger.debug("No feature names in metadata — returning raw numpy arrays")
         return data
 
-    def print_info(self) -> None:
+    def get_indices_map(self, split: str = "train") -> Dict[int, int]:
         """
-        Print a human-readable summary of the cached dataset.
+        Get mapping from track_id to position index for a specific split.
 
-        This is a manual debugging/exploration utility. Does not
-        load the full data — only reads metadata.
+        Args:
+            split: One of 'train', 'val', 'test'
+
+        Returns:
+            Dictionary mapping track_id -> position in the array
         """
+        valid_splits = ['train', 'val', 'test']
+        if split not in valid_splits:
+            raise ValueError(f"Unknown split: '{split}'. Expected: {valid_splits}")
+
+        if split in self._indices_cache:
+            return self._indices_cache[split]
+
+        data = self.load()
+        indices = data[f'{split}_indices']
+
+        indices_map = {int(idx): i for i, idx in enumerate(indices)}
+        self._indices_cache[split] = indices_map
+
+        logger.debug(f"Built indices map for {split}: {len(indices_map)} entries")
+        return indices_map
+
+    def get_filtered_by_indices(
+            self,
+            track_ids: Union[List[int], np.ndarray],
+            split: str = "train",
+            return_indices: bool = False
+    ) -> Dict[str, np.ndarray]:
+        """
+        Load data filtered by specific track indices.
+
+        Args:
+            track_ids: List or array of track IDs to filter
+            split: One of 'train', 'val', 'test'
+            return_indices: If True, also return the actual track IDs that were found
+
+        Returns:
+            Dictionary with:
+            - 'X': filtered feature array
+            - 'y': filtered labels
+            - (if return_indices): 'indices' array of track IDs that were found
+        """
+        data = self.load()
+        indices_map = self.get_indices_map(split)
+
+        found_positions = []
+        found_indices = []
+
+        for tid in track_ids:
+            tid_int = int(tid)
+            if tid_int in indices_map:
+                found_positions.append(indices_map[tid_int])
+                found_indices.append(tid_int)
+
+        if not found_positions:
+            available = list(indices_map.keys())[:10]
+            raise ValueError(
+                f"No matching indices found in {split} split.\n"
+                f"Requested {len(track_ids)} tracks, found 0.\n"
+                f"Sample available tracks: {available}"
+            )
+
+        X = data[f'X_{split}'][found_positions]
+        y = data[f'y_{split}'][found_positions]
+
+        result = {'X': X, 'y': y}
+
+        if return_indices:
+            result['indices'] = np.array(found_indices)
+
+        missing_count = len(track_ids) - len(found_positions)
+        if missing_count > 0:
+            logger.warning(
+                f"Filtered {split}: found {len(found_positions)}/{len(track_ids)} tracks "
+                f"({missing_count} missing)"
+            )
+        else:
+            logger.debug(f"Filtered {split}: all {len(found_positions)} tracks found")
+
+        return result
+
+    def get_split_summary(self, split: str = "train") -> Dict[str, Any]:
+        """
+        Get a quick summary of a split without loading full data.
+
+        Args:
+            split: One of 'train', 'val', 'test'
+
+        Returns:
+            Dictionary with split summary
+        """
+        data = self.load()
+        y = data[f'y_{split}']
+        genre_names = data['genre_names']
+
+        unique, counts = np.unique(y, return_counts=True)
+
+        class_distribution = {
+            genre_names[i]: int(count) for i, count in zip(unique, counts)
+        }
+
+        return {
+            'split': split,
+            'size': len(y),
+            'class_distribution': class_distribution,
+            'class_names': genre_names,
+            'min_samples_per_class': int(counts.min()) if len(counts) > 0 else 0,
+            'max_samples_per_class': int(counts.max()) if len(counts) > 0 else 0,
+            'num_classes': len(unique),
+        }
+
+    def clear_cache(self) -> None:
+        """Clear in-memory cache and indices map."""
+        self._data = None
+        self._indices_cache = {}
+        logger.debug("Cleared in-memory cache for %s", self.dataset_id)
+
+    def print_info(self) -> None:
+        """Print a human-readable summary of the cached dataset."""
         if not self.exists():
             print(f"Dataset not found: '{self.dataset_id}'")
             available = self.list_available_datasets()
@@ -287,7 +425,7 @@ class LoadProcessedData:
             meta = json.load(f)
 
         print("=" * 60)
-        print("CACHED DATASET INFO")
+        print("CACHED DATASET INFO (V2)")
         print("=" * 60)
         print(f"Dataset ID:     {self.dataset_id}")
         print(f"FMA subset:     {meta.get('subset', '?').upper()}")
@@ -300,32 +438,26 @@ class LoadProcessedData:
         print(f"  Test:         {meta.get('test_size', '?')}")
         print(f"\nPaths:")
         print(f"  Data:         {self.data_dir}")
-        print(f"  Processors:   {self.processors_dir}")
+        print(f"  Preprocessor: {self._get_preprocessor_dir()}")
 
 
 def load_data(
     subset: Optional[str] = None,
-    min_samples_per_genre: int = 100,
+    min_samples_per_genre: int = 10,
     dataset_id: Optional[str] = None,
     as_dataframe: bool = False,
 ) -> Dict[str, Any]:
     """
-    One-liner to load preprocessed FMA data from cache.
+    One-liner to load preprocessed FMA data from cache (V2 format).
 
     Args:
         subset: FMA subset ('small', 'medium', 'large').
-                Defaults to the configured active subset.
-        min_samples_per_genre: Minimum tracks per genre (default: 100).
+        min_samples_per_genre: Minimum tracks per genre (default: 10).
         dataset_id: Full dataset ID string. Overrides subset/min if provided.
-        as_dataframe: If True, returns feature data as pandas DataFrames
-                      with column names instead of raw numpy arrays.
+        as_dataframe: If True, returns feature data as pandas DataFrames.
 
     Returns:
         Data dictionary with X_train, y_train, etc.
-
-    Example:
-        >>> data = load_data(subset="medium", min_samples_per_genre=100)
-        >>> X_train, y_train = data['X_train'], data['y_train']
     """
     loader = LoadProcessedData(
         subset=subset,
@@ -339,16 +471,11 @@ def load_data(
 
 def load_track_indices(
     subset: Optional[str] = None,
-    min_samples_per_genre: int = 100,
+    min_samples_per_genre: int = 10,
     dataset_id: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Quickly load only the train/val/test track index arrays.
-
-    Args:
-        subset: FMA subset name.
-        min_samples_per_genre: Minimum tracks per genre.
-        dataset_id: Full dataset ID (overrides subset/min).
 
     Returns:
         Tuple of (train_indices, val_indices, test_indices).
@@ -364,14 +491,10 @@ def load_track_indices(
 
 def list_datasets() -> List[str]:
     """
-    List all cached dataset configurations available on disk.
+    List all cached dataset configurations available on disk (V2 format).
 
     Returns:
         Sorted list of dataset_id strings.
-
-    Example:
-        >>> for ds in list_datasets():
-        ...     print(ds)
     """
     loader = LoadProcessedData()
     return loader.list_available_datasets()

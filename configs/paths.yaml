@@ -1,13 +1,13 @@
-project_root: "D:/Projects/PythonProject/music-genre-classification-fma"
+project_root: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma"
 
 external_data:
-  metadata_dir: "E:/music-genre-classifier/fma_metadata"
-  fma_small_zip: "E:/music-genre-classifier/fma_small.zip"
-  fma_medium_zip: "E:/music-genre-classifier/fma_medium.zip"
-  fma_large_zip: "E:/music-genre-classifier/fma_large.zip"
+  metadata_dir: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/data/raw/fma_metadata"
+  fma_small_zip: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/data/raw/fma_small.zip"
+  fma_medium_zip: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/data/raw/fma_medium.zip"
+  fma_large_zip: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/data/raw/fma_large.zip"
 
   active_subset: "medium"
-  active_zip: "E:/music-genre-classifier/fma_medium.zip"
+  active_zip: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/data/raw/fma_medium.zip"
 
 zip_structure:
     template: "fma_{subset}/{folder}/{track_id}.mp3"

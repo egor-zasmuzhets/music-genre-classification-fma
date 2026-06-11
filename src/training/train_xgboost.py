@@ -5,8 +5,13 @@ Orchestrates data loading, model training (or grid search), evaluation,
 and result persistence. Supports command-line configuration for subset,
 class weights, and hyperparameter search.
 
+V2 Changes:
+- Uses updated load_processed (V2 format)
+- No changes needed to model saving (already JSON)
+- Works with new directory structure
+
 Usage:
-    python -m src.training.train_xgboost --subset medium --min_samples 100
+    python -m src.training.train_xgboost --subset medium --min_samples 10
     python -m src.training.train_xgboost --grid_search --grid_size small
     python -m src.training.train_xgboost --subset small --no_weights
 """
@@ -32,12 +37,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """
-    Build the argument parser for XGBoost training.
-
-    Returns:
-        Configured ArgumentParser instance.
-    """
+    """Build the argument parser for XGBoost training."""
     parser = argparse.ArgumentParser(
         description="Train XGBoost model for mono classification"
     )
@@ -80,7 +80,7 @@ def load_and_report_data(
     min_samples: int,
 ) -> Dict[str, Any]:
     """
-    Load preprocessed data and log a distribution summary.
+    Load preprocessed data and log a distribution summary (V2 format).
 
     Args:
         subset: FMA subset name.
@@ -98,7 +98,7 @@ def load_and_report_data(
     genre_names = data["genre_names"]
 
     logger.info(
-        "Data loaded — train: %s, val: %s, test: %s, genres: %d",
+        "Data loaded (V2) — train: %s, val: %s, test: %s, genres: %d",
         X_train.shape, X_val.shape, X_test.shape, len(genre_names)
     )
 
@@ -109,10 +109,9 @@ def load_and_report_data(
         pct = 100 * count / len(y_train)
         distribution_lines.append(f"  {name:20s}: {count:5d} ({pct:5.1f}%)")
 
-    logger.info(
-        "Training class distribution:\n%s",
-        "\n".join(distribution_lines),
-    )
+    logger.info("Training class distribution:\n%s", "\n".join(distribution_lines[:10]))
+    if len(distribution_lines) > 10:
+        logger.info("  ... and %d more genres", len(distribution_lines) - 10)
 
     return data
 
@@ -138,17 +137,6 @@ def run_grid_search(
 ) -> Optional[Dict[str, Any]]:
     """
     Run hyperparameter grid search and return best parameters.
-
-    Args:
-        X_train, y_train: Training data.
-        X_val, y_val: Validation data.
-        X_test, y_test: Test data for final evaluation.
-        genre_names: Ordered list of genre names.
-        grid_size: 'small', 'medium', or 'full'.
-        use_class_weights: Whether to use balanced class weights.
-
-    Returns:
-        Dictionary of best parameters, or None if grid search fails.
     """
     from src.training.grid_search import (
         XGBoostGridSearch,
@@ -166,8 +154,7 @@ def run_grid_search(
 
     logger.info(
         "Starting grid search [size=%s, combinations=%d]",
-        grid_size,
-        _count_combinations(param_grid),
+        grid_size, _count_combinations(param_grid)
     )
 
     grid_search = XGBoostGridSearch(
@@ -188,10 +175,8 @@ def run_grid_search(
     for metric, info in best_by_metric.items():
         logger.info(
             "Best by %s: composite=%.4f, f1_macro=%.4f, top3=%.4f",
-            metric,
-            info["metrics"]["composite_score"],
-            info["metrics"]["f1_macro"],
-            info["metrics"].get("top_3_accuracy", 0.0),
+            metric, info["metrics"]["composite_score"],
+            info["metrics"]["f1_macro"], info["metrics"].get("top_3_accuracy", 0.0)
         )
 
     best_params = grid_search.get_best_params(metric="composite_score")
@@ -208,15 +193,6 @@ def evaluate_and_report(
 ) -> Dict[str, Any]:
     """
     Run comprehensive evaluation and log key metrics.
-
-    Args:
-        model: Trained classifier.
-        X_test: Test feature matrix.
-        y_test: Test labels.
-        genre_names: Genre name strings.
-
-    Returns:
-        Metrics dictionary from comprehensive_evaluate().
     """
     logger.info("Running comprehensive evaluation...")
     metrics = model.comprehensive_evaluate(X_test, y_test, genre_names)
@@ -225,23 +201,18 @@ def evaluate_and_report(
     logger.info(
         "Evaluation results — accuracy: %.4f, f1_macro: %.4f, "
         "f1_weighted: %.4f, composite: %.4f",
-        metrics["accuracy"],
-        metrics["f1_macro"],
-        metrics["f1_weighted"],
-        metrics["composite_score"],
+        metrics["accuracy"], metrics["f1_macro"],
+        metrics["f1_weighted"], metrics["composite_score"]
     )
     logger.info(
         "Confidence — correct: %.3f ± %.3f, wrong: %.3f ± %.3f, gap: %.3f",
-        conf["confidence_correct_mean"],
-        conf["confidence_correct_std"],
-        conf["confidence_wrong_mean"],
-        conf["confidence_wrong_std"],
-        conf["confidence_gap"],
+        conf["confidence_correct_mean"], conf["confidence_correct_std"],
+        conf["confidence_wrong_mean"], conf["confidence_wrong_std"],
+        conf["confidence_gap"]
     )
     logger.info(
         "Low-confidence predictions: %d (%.1f%%)",
-        conf["low_confidence_count"],
-        100 * conf["low_confidence_rate"],
+        conf["low_confidence_count"], 100 * conf["low_confidence_rate"]
     )
 
     return metrics
@@ -261,7 +232,7 @@ def save_results(
     results_dict = {
         "timestamp": datetime.now().isoformat(),
         "task": "mono_classification",
-        "task_description": "Single-label genre classification (main genre only)",
+        "task_description": "Single-label genre classification",
         "model_type": "xgboost",
         "subset": args.subset,
         "min_samples_per_genre": args.min_samples,
@@ -274,6 +245,7 @@ def save_results(
         "confidence_analysis": metrics["confidence"],
         "genre_names": genre_names,
         "class_metrics": metrics.get("classification_report"),
+        "format_version": 2,
     }
 
     metrics_path = paths.xgboost.metrics_dir / "comprehensive_results.json"
@@ -282,13 +254,13 @@ def save_results(
         json.dump(results_dict, f, indent=2, ensure_ascii=False)
     logger.info("Metrics saved: %s", metrics_path)
 
-    # Анализ значимости признаков
+    # Feature importance analysis
     feature_importance = model.get_feature_importance(top_n=30)
     fi_path = paths.xgboost.plots_dir / "feature_importance.csv"
     feature_importance.to_csv(fi_path)
     logger.info("Feature importance saved: %s", fi_path)
 
-    # График важности признаков
+    # Feature importance plot
     fig, ax = plt.subplots(figsize=(10, 8))
     top_features = feature_importance.head(20).iloc[::-1]
     ax.barh(range(len(top_features)), top_features["importance"], color="steelblue")
@@ -301,7 +273,7 @@ def save_results(
     plt.close()
     logger.info("Feature importance plot saved")
 
-    # Полный анализ
+    # Full analysis
     analyzer = ModelAnalyzer(model, genre_names)
     analysis = analyzer.analyze_predictions(X_test, y_test)
     analyzer.print_analysis_report(analysis)
@@ -312,9 +284,6 @@ def save_results(
 def main() -> Dict[str, Any]:
     """
     Main entry point for XGBoost training.
-
-    Parses arguments, loads data, trains (or grid-searches),
-    evaluates, and persists results.
 
     Returns:
         Final metrics dictionary.
@@ -329,16 +298,13 @@ def main() -> Dict[str, Any]:
     )
 
     logger.info("=" * 60)
-    logger.info("XGBOOST TRAINING — MONO CLASSIFICATION")
+    logger.info("XGBOOST TRAINING — MONO CLASSIFICATION (V2)")
     logger.info("=" * 60)
     logger.info(
         "Config — subset=%s, min_samples=%d, class_weights=%s, "
         "grid_search=%s, grid_size=%s",
-        args.subset,
-        args.min_samples,
-        not args.no_weights,
-        args.grid_search,
-        args.grid_size if args.grid_search else "n/a",
+        args.subset, args.min_samples, not args.no_weights,
+        args.grid_search, args.grid_size if args.grid_search else "n/a"
     )
     logger.info("Started: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -360,6 +326,7 @@ def main() -> Dict[str, Any]:
         model = XGBoostGenreClassifier(
             params=best_params,
             use_class_weights=not args.no_weights,
+            model_name="xgb_medium_10"
         )
     else:
         model = XGBoostGenreClassifier(
@@ -379,8 +346,7 @@ def main() -> Dict[str, Any]:
 
     logger.info(
         "Training pipeline complete — model: %s, metrics: %s",
-        paths.xgboost.models_dir,
-        metrics_path,
+        paths.xgboost.models_dir, metrics_path
     )
 
     return metrics

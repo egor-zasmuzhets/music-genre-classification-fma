@@ -9,10 +9,8 @@ n_mels: 128
 fmin: 0
 fmax: 8000
 
-n_mfcc: 20
-
+n_mfcc: 40
 n_chroma: 12
-
 n_bands: 7
 
 augmentation:
