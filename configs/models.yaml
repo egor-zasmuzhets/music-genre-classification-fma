@@ -1,0 +1,65 @@
+models:
+  xgboost_mono:
+    name: "xgboost_final"
+    type: "xgboost"
+    version: "2.0.0"
+    description: "XGBoost classifier for music genre classification with comprehensive metrics"
+    
+    paths:
+      results_dir: "results/xgboost_mono"
+      checkpoints_dir: #None
+      logs_dir: "logs/xgboost_mono"
+      models_dir: "models/xgboost_mono"
+    
+    parameters:
+      n_estimators: 100
+      max_depth: 9
+      learning_rate: 0.1
+      subsample: 0.8
+      colsample_bytree: 0.8
+      min_child_weight: 3
+      reg_alpha: 0.1
+      reg_lambda: 1
+      random_state: 42
+      n_jobs: -1
+
+    training:
+      use_class_weights: true
+      early_stopping: true
+      early_stopping_patience: 20
+      eval_metric: "mlogloss"
+
+    selection_metrics:
+      primary: "composite_score"
+      weights:
+        f1_macro: 0.4
+        top_3_accuracy: 0.4
+        f1_weighted: 0.2
+
+  cnn_mfcc_mono:
+    type: "cnn"
+    name: "cnn_mfcc_v1"
+    version: "1.0.0"
+    description: "CNN with MFCC features for music genre classification"
+    
+    paths:
+      results_dir: "results/cnn_mfcc_mono"
+      checkpoints_dir: "checkpoints/cnn_mfcc_mono"
+      logs_dir: "logs/cnn_mfcc_mono"
+      models_dir: "models/cnn_mfcc_mono"
+    
+    architecture:
+      input_shape: [3, 20, 128]
+      conv_layers: [32, 64, 128]
+      dropout_rate: 0.3
+      fc_units: [128]
+    
+    training:
+      batch_size: 64
+      epochs: 100
+      learning_rate: 0.001
+      optimizer: "adam"
+      loss: "cross_entropy"
+      early_stopping_patience: 15
+      reduce_lr_patience: 7
+      use_augmentation: true

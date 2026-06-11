@@ -1,185 +1,353 @@
-#!/usr/bin/env python
 """
-src/training/train_xgboost.py
-Обучение XGBoost модели с комплексной оценкой (MONO Classification)
+XGBoost training script with comprehensive evaluation (mono classification).
+
+Orchestrates data loading, model training (or grid search), evaluation,
+and result persistence. Supports command-line configuration for subset,
+class weights, and hyperparameter search.
+
+V2 Changes:
+- Uses updated load_processed (V2 format)
+- No changes needed to model saving (already JSON)
+- Works with new directory structure
+
+Usage:
+    python -m src.training.train_xgboost --subset medium --min_samples 10
+    python -m src.training.train_xgboost --grid_search --grid_size small
+    python -m src.training.train_xgboost --subset small --no_weights
 """
 
-import sys
-import json
 import argparse
-import numpy as np
-from pathlib import Path
+import json
+import logging
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+import numpy as np
+from matplotlib import pyplot as plt
 
 from src.data.load_processed import load_data
-from src.data.config import paths
 from src.models.xgboost_model import XGBoostGenreClassifier
 from src.training.analyzer import ModelAnalyzer
+from src.utils.config import paths
+from src.utils.logging_utils import setup_logging
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Train XGBoost model for mono classification')
-    parser.add_argument('--config', type=str, default=None, help='Path to config file')
-    parser.add_argument('--subset', type=str, default='medium', help='FMA subset')
-    parser.add_argument('--min_samples', type=int, default=100, help='Min samples per genre')
-    parser.add_argument('--no_weights', action='store_true', help='Disable class weights')
-    parser.add_argument('--grid_search', action='store_true', help='Run grid search')
-    parser.add_argument('--grid_size', type=str, default='small',
-                        choices=['small', 'medium', 'full'], help='Grid search size')
-    args = parser.parse_args()
+logger = logging.getLogger(__name__)
 
-    print("=" * 70)
-    print("ОБУЧЕНИЕ XGBOOST МОДЕЛИ (MONO CLASSIFICATION)")
-    print("Single-Label Genre Classification — предсказание главного жанра")
-    print("=" * 70)
-    print(f"Дата: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Подмножество: {args.subset}")
-    print(f"Min samples: {args.min_samples}")
-    print(f"Веса классов: {not args.no_weights}")
-    print(f"Grid Search: {args.grid_search}")
-    if args.grid_search:
-        print(f"Grid size: {args.grid_size}")
-    print("-" * 70)
 
-    # 1. Загружаем данные
-    print("\n[1/5] Загрузка данных...")
-    data = load_data(
-        subset=args.subset,
-        min_samples_per_genre=args.min_samples
+def build_parser() -> argparse.ArgumentParser:
+    """Build the argument parser for XGBoost training."""
+    parser = argparse.ArgumentParser(
+        description="Train XGBoost model for mono classification"
+    )
+    parser.add_argument(
+        "--config", type=str, default=None,
+        help="Path to model config YAML file"
+    )
+    parser.add_argument(
+        "--subset", type=str, default="medium",
+        choices=["small", "medium", "large"],
+        help="FMA subset to use (default: medium)"
+    )
+    parser.add_argument(
+        "--min_samples", type=int, default=10,
+        help="Minimum tracks per genre (default: 10)"
+    )
+    parser.add_argument(
+        "--no_weights", action="store_true",
+        help="Disable class-balanced sample weights"
+    )
+    parser.add_argument(
+        "--grid_search", action="store_true",
+        help="Run hyperparameter grid search before final training"
+    )
+    parser.add_argument(
+        "--grid_size", type=str, default="small",
+        choices=["small", "medium", "full"],
+        help="Grid search coverage (default: small)"
+    )
+    parser.add_argument(
+        "--log_level", type=str, default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Logging level (default: INFO)"
+    )
+    return parser
+
+
+def load_and_report_data(
+    subset: str,
+    min_samples: int,
+) -> Dict[str, Any]:
+    """
+    Load preprocessed data and log a distribution summary (V2 format).
+
+    Args:
+        subset: FMA subset name.
+        min_samples: Minimum tracks per genre.
+
+    Returns:
+        Data dictionary from load_data().
+    """
+    logger.info("Loading data [subset=%s, min_samples=%d]", subset, min_samples)
+
+    data = load_data(subset=subset, min_samples_per_genre=min_samples)
+
+    X_train, X_val, X_test = data["X_train"], data["X_val"], data["X_test"]
+    y_train = data["y_train"]
+    genre_names = data["genre_names"]
+
+    logger.info(
+        "Data loaded (V2) — train: %s, val: %s, test: %s, genres: %d",
+        X_train.shape, X_val.shape, X_test.shape, len(genre_names)
     )
 
-    X_train, X_val, X_test = data['X_train'], data['X_val'], data['X_test']
-    y_train, y_val, y_test = data['y_train'], data['y_val'], data['y_test']
-    genre_names = data['genre_names']
-
-    print(f"  Train: {X_train.shape}")
-    print(f"  Val:   {X_val.shape}")
-    print(f"  Test:  {X_test.shape}")
-    print(f"  Жанров: {len(genre_names)}")
-
-    # Распределение жанров
     unique, counts = np.unique(y_train, return_counts=True)
-    print(f"\n  Распределение жанров в train:")
+    distribution_lines = []
     for genre_id, count in zip(unique, counts):
-        print(f"    {genre_names[genre_id]:20s}: {count} ({count / len(y_train) * 100:.1f}%)")
+        name = genre_names[genre_id] if genre_id < len(genre_names) else f"#{genre_id}"
+        pct = 100 * count / len(y_train)
+        distribution_lines.append(f"  {name:20s}: {count:5d} ({pct:5.1f}%)")
 
-    # 2. Обучение или Grid Search
-    if args.grid_search:
-        print("\n[2/5] Запуск Grid Search...")
-        from src.training.grid_search import XGBoostGridSearch, GRID_SMALL, GRID_MEDIUM, GRID_FULL
+    logger.info("Training class distribution:\n%s", "\n".join(distribution_lines[:10]))
+    if len(distribution_lines) > 10:
+        logger.info("  ... and %d more genres", len(distribution_lines) - 10)
 
-        if args.grid_size == 'small':
-            param_grid = GRID_SMALL
-        elif args.grid_size == 'medium':
-            param_grid = GRID_MEDIUM
-        else:
-            param_grid = GRID_FULL
+    return data
 
-        grid_search = XGBoostGridSearch(
-            param_grid=param_grid,
-            use_class_weights=not args.no_weights,
-            verbose=True
+
+def _count_combinations(param_grid: Dict[str, list]) -> int:
+    """Count the total number of hyperparameter combinations."""
+    total = 1
+    for values in param_grid.values():
+        total *= len(values)
+    return total
+
+
+def run_grid_search(
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    X_val: np.ndarray,
+    y_val: np.ndarray,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    genre_names: list,
+    grid_size: str,
+    use_class_weights: bool,
+) -> Optional[Dict[str, Any]]:
+    """
+    Run hyperparameter grid search and return best parameters.
+    """
+    from src.training.grid_search import (
+        XGBoostGridSearch,
+        GRID_SMALL,
+        GRID_MEDIUM,
+        GRID_FULL,
+    )
+
+    grid_map = {
+        "small": GRID_SMALL,
+        "medium": GRID_MEDIUM,
+        "full": GRID_FULL,
+    }
+    param_grid = grid_map[grid_size]
+
+    logger.info(
+        "Starting grid search [size=%s, combinations=%d]",
+        grid_size, _count_combinations(param_grid)
+    )
+
+    grid_search = XGBoostGridSearch(
+        param_grid=param_grid,
+        use_class_weights=use_class_weights,
+    )
+
+    grid_search.fit(
+        X_train, y_train,
+        X_val, y_val,
+        X_test, y_test,
+        genre_names,
+    )
+
+    grid_search.save_results()
+
+    best_by_metric = grid_search.get_best_by_metric()
+    for metric, info in best_by_metric.items():
+        logger.info(
+            "Best by %s: composite=%.4f, f1_macro=%.4f, top3=%.4f",
+            metric, info["metrics"]["composite_score"],
+            info["metrics"]["f1_macro"], info["metrics"].get("top_3_accuracy", 0.0)
         )
 
-        results = grid_search.fit(
+    best_params = grid_search.get_best_params(metric="composite_score")
+    logger.info("Best parameters: %s", best_params)
+
+    return best_params
+
+
+def evaluate_and_report(
+    model: XGBoostGenreClassifier,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    genre_names: list,
+) -> Dict[str, Any]:
+    """
+    Run comprehensive evaluation and log key metrics.
+    """
+    logger.info("Running comprehensive evaluation...")
+    metrics = model.comprehensive_evaluate(X_test, y_test, genre_names)
+
+    conf = metrics["confidence"]
+    logger.info(
+        "Evaluation results — accuracy: %.4f, f1_macro: %.4f, "
+        "f1_weighted: %.4f, composite: %.4f",
+        metrics["accuracy"], metrics["f1_macro"],
+        metrics["f1_weighted"], metrics["composite_score"]
+    )
+    logger.info(
+        "Confidence — correct: %.3f ± %.3f, wrong: %.3f ± %.3f, gap: %.3f",
+        conf["confidence_correct_mean"], conf["confidence_correct_std"],
+        conf["confidence_wrong_mean"], conf["confidence_wrong_std"],
+        conf["confidence_gap"]
+    )
+    logger.info(
+        "Low-confidence predictions: %d (%.1f%%)",
+        conf["low_confidence_count"], 100 * conf["low_confidence_rate"]
+    )
+
+    return metrics
+
+
+def save_results(
+    model: XGBoostGenreClassifier,
+    metrics: Dict[str, Any],
+    args: argparse.Namespace,
+    genre_names: list,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+) -> Path:
+    """Persist model, metrics, and generate analysis."""
+    model.save()
+
+    results_dict = {
+        "timestamp": datetime.now().isoformat(),
+        "task": "mono_classification",
+        "task_description": "Single-label genre classification",
+        "model_type": "xgboost",
+        "subset": args.subset,
+        "min_samples_per_genre": args.min_samples,
+        "use_class_weights": not args.no_weights,
+        "params": model.params,
+        "metrics": {
+            k: v for k, v in metrics.items()
+            if k not in ("classification_report", "confidence")
+        },
+        "confidence_analysis": metrics["confidence"],
+        "genre_names": genre_names,
+        "class_metrics": metrics.get("classification_report"),
+        "format_version": 2,
+    }
+
+    metrics_path = paths.xgboost.metrics_dir / "comprehensive_results.json"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(results_dict, f, indent=2, ensure_ascii=False)
+    logger.info("Metrics saved: %s", metrics_path)
+
+    # Feature importance analysis
+    feature_importance = model.get_feature_importance(top_n=30)
+    fi_path = paths.xgboost.plots_dir / "feature_importance.csv"
+    feature_importance.to_csv(fi_path)
+    logger.info("Feature importance saved: %s", fi_path)
+
+    # Feature importance plot
+    fig, ax = plt.subplots(figsize=(10, 8))
+    top_features = feature_importance.head(20).iloc[::-1]
+    ax.barh(range(len(top_features)), top_features["importance"], color="steelblue")
+    ax.set_yticks(range(len(top_features)))
+    ax.set_yticklabels(top_features["feature"], fontsize=8)
+    ax.set_xlabel("Importance")
+    ax.set_title("Top-20 Feature Importance — XGBoost")
+    plt.tight_layout()
+    plt.savefig(paths.xgboost.plots_dir / "feature_importance.png", dpi=150)
+    plt.close()
+    logger.info("Feature importance plot saved")
+
+    # Full analysis
+    analyzer = ModelAnalyzer(model, genre_names)
+    analysis = analyzer.analyze_predictions(X_test, y_test)
+    analyzer.print_analysis_report(analysis)
+
+    return metrics_path
+
+
+def main() -> Dict[str, Any]:
+    """
+    Main entry point for XGBoost training.
+
+    Returns:
+        Final metrics dictionary.
+    """
+    parser = build_parser()
+    args = parser.parse_args()
+
+    setup_logging(
+        level=args.log_level,
+        mode="both",
+        console_level=args.log_level,
+    )
+
+    logger.info("=" * 60)
+    logger.info("XGBOOST TRAINING — MONO CLASSIFICATION (V2)")
+    logger.info("=" * 60)
+    logger.info(
+        "Config — subset=%s, min_samples=%d, class_weights=%s, "
+        "grid_search=%s, grid_size=%s",
+        args.subset, args.min_samples, not args.no_weights,
+        args.grid_search, args.grid_size if args.grid_search else "n/a"
+    )
+    logger.info("Started: %s", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+    data = load_and_report_data(args.subset, args.min_samples)
+
+    X_train, X_val, X_test = data["X_train"], data["X_val"], data["X_test"]
+    y_train, y_val, y_test = data["y_train"], data["y_val"], data["y_test"]
+    genre_names = data["genre_names"]
+
+    if args.grid_search:
+        best_params = run_grid_search(
             X_train, y_train,
             X_val, y_val,
             X_test, y_test,
-            genre_names
+            genre_names,
+            args.grid_size,
+            not args.no_weights,
         )
-
-        grid_search.save_results()
-
-        best_params = grid_search.get_best_params(metric='composite_score')
-
-        print("\n[Сравнение] Лучшие модели по разным метрикам:")
-        best_by_metric = grid_search.get_best_by_metric()
-        for metric, info in best_by_metric.items():
-            print(f"  {metric}: composite={info['metrics']['composite_score']:.4f}, "
-                  f"f1_macro={info['metrics']['f1_macro']:.4f}, "
-                  f"top3={info['metrics']['top_3_acc']:.4f}")
-
-        print("\n[3/5] Обучение финальной модели с лучшими параметрами...")
         model = XGBoostGenreClassifier(
             params=best_params,
-            use_class_weights=not args.no_weights
+            use_class_weights=not args.no_weights,
+            model_name="xgb_medium_10"
         )
     else:
-        print("\n[2/5] Обучение модели...")
         model = XGBoostGenreClassifier(
-            config_path=args.config,
-            use_class_weights=not args.no_weights
+            config_path=Path(args.config) if args.config else None,
+            use_class_weights=not args.no_weights,
         )
 
-    # Обучаем финальную модель
     model.fit(
         X_train, y_train,
         X_val=X_val, y_val=y_val,
         genre_names=genre_names,
-        verbose=True
     )
 
-    # 4. Комплексная оценка
-    print("\n[4/5] Комплексная оценка модели...")
-    metrics = model.comprehensive_evaluate(X_test, y_test, genre_names)
+    metrics = evaluate_and_report(model, X_test, y_test, genre_names)
 
-    print(f"\n{'=' * 70}")
-    print("РЕЗУЛЬТАТЫ КОМПЛЕКСНОЙ ОЦЕНКИ (MONO CLASSIFICATION)")
-    print(f"{'=' * 70}")
-    print(f"Accuracy:          {metrics['accuracy']:.4f}")
-    print(f"F1-macro:          {metrics['f1_macro']:.4f}")
-    print(f"F1-weighted:       {metrics['f1_weighted']:.4f}")
-    print(f"F1-micro:          {metrics['f1_micro']:.4f}")
-    print(f"\nTop-1 Accuracy:    {metrics['top_1_accuracy']:.4f}")
-    print(f"Top-3 Accuracy:    {metrics['top_3_accuracy']:.4f}")
-    print(f"Top-5 Accuracy:    {metrics['top_5_accuracy']:.4f}")
-    print(f"\nROC-AUC (ovo):     {metrics['roc_auc_ovo']:.4f}")
-    print(f"ROC-AUC (ovr):     {metrics['roc_auc_ovr']:.4f}")
-    print(f"\nComposite Score:   {metrics['composite_score']:.4f}")
-    print(f"\nАнализ уверенности:")
-    conf = metrics['confidence']
-    print(f"  Уверенность (прав.): {conf['confidence_correct_mean']:.3f} ± {conf['confidence_correct_std']:.3f}")
-    print(f"  Уверенность (ошиб.): {conf['confidence_wrong_mean']:.3f} ± {conf['confidence_wrong_std']:.3f}")
-    print(f"  Разрыв:               {conf['confidence_gap']:.3f}")
-    print(f"  Низкая уверенность:   {conf['low_confidence_rate']:.2%}")
-    print(f"{'=' * 70}")
+    metrics_path = save_results(model, metrics, args, genre_names, X_test, y_test)
 
-    # 5. Сохраняем модель и результаты
-    print("\n[5/5] Сохранение...")
-    model.save()
-
-    # Сохраняем метрики в JSON
-    results_dict = {
-        'timestamp': datetime.now().isoformat(),
-        'task': 'mono_classification',
-        'task_description': 'Single-label genre classification (main genre only)',
-        'model_type': 'xgboost',
-        'subset': args.subset,
-        'min_samples_per_genre': args.min_samples,
-        'use_class_weights': not args.no_weights,
-        'params': model.params,
-        'metrics': {k: v for k, v in metrics.items() if k not in ['classification_report', 'confidence']},
-        'confidence_analysis': metrics['confidence'],
-        'genre_names': genre_names,
-        'class_metrics': metrics.get('classification_report')
-    }
-
-    metrics_path = paths.xgboost_mono_metrics_dir / "comprehensive_results.json"
-    with open(metrics_path, 'w', encoding='utf-8') as f:
-        json.dump(results_dict, f, indent=2, ensure_ascii=False)
-
-    print(f"\n✅ Модель обучена и сохранена!")
-    print(f"   Модель: {paths.xgboost_mono_models_dir / 'xgboost_best.json'}")
-    print(f"   Результаты: {metrics_path}")
-    print(f"   Графики: {paths.xgboost_mono_plots_dir}")
-
-    # Визуализация
-    print("\n[Визуализация] Генерация отчётов...")
-    analyzer = ModelAnalyzer(model, genre_names)
-    analysis = analyzer.analyze_predictions(X_test, y_test)
-    analyzer.print_analysis_report(analysis)
+    logger.info(
+        "Training pipeline complete — model: %s, metrics: %s",
+        paths.xgboost.models_dir, metrics_path
+    )
 
     return metrics
 
