@@ -1,8 +1,0 @@
-telegram_bot_token: "8785991912:AAG59WgXB4mhb1pA_GesZxen5RuiJQ2wmXU"
-
-cnn_checkpoint_path: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/models/cnn_mfcc_mono/best_model.pt"
-xgb_checkpoint_dir: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/models/xgboost_mono/"
-stacker_path: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/models/ensemble/stacker/stacker.json"
-save_dataset_dir: "/data/processed/stacking_dataset"
-dataset_dir: "/data/processed/stacking_dataset"
-save_dir: "/home/yahor/PycharmProjects/PythonProject/music-genre-classification-fma/models/ensemble/stacker"

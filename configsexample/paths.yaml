@@ -1,0 +1,26 @@
+project_root: ""
+
+external_data:
+  metadata_dir: ""
+  fma_small_zip: ""
+  fma_medium_zip: ""
+  fma_large_zip: ""
+
+  active_subset: ""
+  active_zip: ""
+
+zip_structure:
+    template: "fma_{subset}/{folder}/{track_id}.mp3"
+    track_id_padding: 6
+    folder_chars: 3
+
+project_dirs:
+  data:
+    raw: "./data/raw"
+    processed: "./data/processed"
+    external: "./data/external"
+  checkpoints: "./checkpoints"
+  results: "./results"
+  models: "./models"
+  notebooks: "./notebooks"
+  logs: "./logs"

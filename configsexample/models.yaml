@@ -1,0 +1,65 @@
+models:
+  xgboost_mono:
+    name: ""
+    type: ""
+    version: ""
+    description: ""
+    
+    paths:
+      results_dir: "o"
+      checkpoints_dir:
+      logs_dir: ""
+      models_dir: ""
+    
+    parameters:
+      n_estimators:
+      max_depth:
+      learning_rate:
+      subsample:
+      colsample_bytree:
+      min_child_weight:
+      reg_alpha:
+      reg_lambda:
+      random_state:
+      n_jobs:
+
+    training:
+      use_class_weights:
+      early_stopping:
+      early_stopping_patience:
+      eval_metric: ""
+
+    selection_metrics:
+      primary: ""
+      weights:
+        f1_macro:
+        top_3_accuracy:
+        f1_weighted:
+
+  cnn_mfcc_mono:
+    type: ""
+    name: ""
+    version: ""
+    description: ""
+    
+    paths:
+      results_dir: ""
+      checkpoints_dir: ""
+      logs_dir: ""
+      models_dir: ""
+    
+    architecture:
+      input_shape:
+      conv_layers:
+      dropout_rate:
+      fc_units:
+    
+    training:
+      batch_size:
+      epochs:
+      learning_rate:
+      optimizer: ""
+      loss: ""
+      early_stopping_patience:
+      reduce_lr_patience:
+      use_augmentation:
