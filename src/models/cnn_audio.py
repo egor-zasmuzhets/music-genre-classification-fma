@@ -55,8 +55,6 @@ class AudioCNN(nn.Module):
         Block 1: Conv2d(n_channels, 64, 5x5) → BN → ReLU → MaxPool2d(2)
         Block 2: Conv2d(64, 128, 5x5) → BN → ReLU → MaxPool2d(2)
         Block 3: Conv2d(128, 256, 3x3) → BN → ReLU → MaxPool2d(2)
-        Block 4: Conv2d(256, 512, 3x3) → BN → ReLU
-        Block 5: Conv2d(512, 1024, 3x3) → BN → ReLU → AdaptiveAvgPool2d((1, None))
 
         Classifier:
             Adaptive pooling → Flatten → Dropout → FC(?, 512) → ReLU
