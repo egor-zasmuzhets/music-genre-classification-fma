@@ -1,8 +1,0 @@
-telegram_bot_token:
-
-cnn_checkpoint_path: ""
-xgb_checkpoint_dir: ""
-stacker_path: ""
-save_dataset_dir: ""
-dataset_dir: ""
-save_dir: ""

@@ -1,0 +1,11 @@
+services:
+  music-bot:
+    build: .
+    image: music-genre-bot
+    container_name: music-bot
+    restart: unless-stopped
+
+    env_file:
+      - .env
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
