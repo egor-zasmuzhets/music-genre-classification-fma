@@ -15,6 +15,7 @@ GenreClassifier — единая точка инференса для Telegram-�
     print(result.to_dict())            # для JSON-ответа
 """
 
+import os
 import warnings
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -29,12 +30,21 @@ from scipy import stats
 
 from src.models.cnn_audio import AudioCNN
 from src.data.preprocessor import DataPreprocessor
-from src.utils.config import paths
 
 # ═══════════════════════════════════════════════════════════
-CNN_CHECKPOINT_PATH = Path("")
-XGB_CHECKPOINT_DIR  = Path("")
-STACKER_PATH        = Path("")
+# Deployment note: this module deliberately does NOT import
+# src.utils.config. That module instantiates `Paths()` at import
+# time, which eagerly reads configs/paths.yaml and raises
+# FileNotFoundError if it's missing — fine for the training
+# pipeline (configs/ is always set up first), but fatal for a
+# standalone inference container that only ships model artifacts.
+# All four artifact locations are resolved explicitly below, with
+# env vars as the container-friendly override mechanism.
+# ═══════════════════════════════════════════════════════════
+CNN_CHECKPOINT_PATH = Path(os.environ.get("CNN_CHECKPOINT", "checkpoints/cnn_model.pt"))
+XGB_CHECKPOINT_DIR  = Path(os.environ.get("XGB_CHECKPOINT_DIR", "checkpoints/xgboost"))
+STACKER_PATH        = Path(os.environ.get("STACKER_PATH", "checkpoints/stacker.json"))
+PREPROCESSOR_DIR    = Path(os.environ.get("PREPROCESSOR_DIR", "checkpoints/preprocessor"))
 # ═══════════════════════════════════════════════════════════
 
 _DATASET_ID    = "medium_10"
@@ -114,14 +124,14 @@ class GenreClassifier:
         cnn_checkpoint: Path = CNN_CHECKPOINT_PATH,
         xgb_dir:        Path = XGB_CHECKPOINT_DIR,
         stacker_path:   Path = STACKER_PATH,
+        preprocessor_dir: Path = PREPROCESSOR_DIR,
         device:         Optional[str] = None,
     ) -> "GenreClassifier":
         """Загружает все модели и возвращает готовый классификатор."""
         device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-        prep_dir = paths.fma_features_dataset_dir / _DATASET_ID / "preprocessor"
         preprocessor = DataPreprocessor()
-        preprocessor.load(prep_dir)
+        preprocessor.load(preprocessor_dir)
 
         cnn = AudioCNN.load(cnn_checkpoint, device=device)
         cnn.eval()

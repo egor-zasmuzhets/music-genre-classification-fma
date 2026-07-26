@@ -1,0 +1,26 @@
+# Core
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+pyyaml>=6.0
+tqdm>=4.65
+
+# Audio processing
+librosa>=0.10
+soundfile>=0.12
+
+# ML / DL
+scikit-learn>=1.3
+xgboost>=2.0
+torch>=2.1
+
+# Visualization (analysis notebooks / metrics_tracker)
+matplotlib>=3.7
+seaborn>=0.12
+
+# Telegram bot (src/bot)
+python-telegram-bot>=20.0
+aiohttp>=3.9
+
+# Testing
+pytest>=7.4

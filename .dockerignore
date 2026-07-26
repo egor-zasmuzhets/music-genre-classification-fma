@@ -1,0 +1,8 @@
+# Игнорируем абсолютно все файлы в корне проекта
+*
+
+# Разрешаем Docker видеть только то, что нужно для сборки
+!src/
+!predict.py
+!requirements-inference.txt
+!Dockerfile

@@ -7,10 +7,14 @@ Telegram-бот для классификации жанра музыки.
 
 import io
 import logging
+import os
+import sys
 import tempfile
 import time
 from pathlib import Path
 from typing import Dict, Tuple
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import aiohttp
 import matplotlib
@@ -29,7 +33,7 @@ from ensemble import GenreClassifier, ClassifierResult
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = ""
+BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
 SUPPORTED_EXTENSIONS = {".mp3", ".wav", ".flac", ".ogg", ".m4a", ".mp4"}
 SUPPORTED_STR = ", ".join(sorted(SUPPORTED_EXTENSIONS))
@@ -470,6 +474,13 @@ async def handle_wrong_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 def main() -> None:
     global classifier
+
+    if not BOT_TOKEN:
+        raise SystemExit(
+            "TELEGRAM_BOT_TOKEN is not set. Pass it as an environment variable, "
+            "e.g. `docker run -e TELEGRAM_BOT_TOKEN=... `."
+        )
+
     logger.info("Загружаю модели...")
     classifier = GenreClassifier.load()
     logger.info("Модели загружены. Запускаю бота...")
